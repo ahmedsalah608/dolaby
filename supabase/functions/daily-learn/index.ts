@@ -52,7 +52,8 @@ Deno.serve(async (req) => {
   const wardrobe = (items || []).map((i: any) => `${i.category}: ${i.name}`).join("، ").slice(0, 1200);
   const sys = `إنت لورينزو، خيّاط ومستشار مظهر. كل يوم بتعمل بحث صغير على النت عشان تفضل متابع الموضة والستايل الرجالي، ومركّز على اللي يفيد أحمد: راجل مصري في إسكندرية، شغل مكتبي ومناسبات وأفراح، بيحب العطور، وبيلبس نضارة.
 اختار موضوع واحد النهارده (مختلف عن اللي فات)، وابحث بـweb_search بحد أقصى ${maxUses} بحث، وطلّع منه ملاحظة عملية. ما تكتبش أي معلومة مش من البحث، ومن غير أسعار. رد بـJSON بس بالعربي المصري:
-{"topic":"عنوان قصير","insight":"خلاصة في 2-3 جمل","tips":["نصيحة عملية قصيرة","..."],"sources":[{"title":"","url":""}]}`;
+{"topic":"عنوان قصير","insight":"خلاصة في 2-3 جمل","tips":["نصيحة عملية قصيرة","..."],"sources":[{"title":"","url":""}]}
+الـJSON يكون آخر حاجة في ردك، ومن غير أي كلام قبله ولا بعده.`;
   const userMsg = `النهارده ${cairoDay()} (${month}). أهدافه: ${goals}. اللي يعرفه المستشار عنه: ${JSON.stringify(adv?.about || {}).slice(0, 800)}. دولابه: ${wardrobe || "فاضي"}.
 مواضيع اتعملت قبل كده (ماتكررهاش): ${(recent || []).map((r: any) => r.topic).join("، ") || "مفيش"}.`;
 
@@ -60,7 +61,7 @@ Deno.serve(async (req) => {
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST", headers: { "x-api-key": key.anthropic_key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 1200, system: sys, messages: [{ role: "user", content: userMsg }],
+      body: JSON.stringify({ model: MODEL, max_tokens: 3000, system: sys, messages: [{ role: "user", content: userMsg }],
         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxUses, allowed_callers: ["direct"], user_location: { type: "approximate", city: "Alexandria", timezone: "Africa/Cairo" } }] }),
       signal: AbortSignal.timeout(100_000),
     });
@@ -69,9 +70,12 @@ Deno.serve(async (req) => {
     usage = data.usage || {}; total = cost(usage);
     const errs = (data.content || []).filter((b: any) => b.type === "web_search_tool_result" && b.content?.type === "web_search_tool_result_error").map((b: any) => b.content.error_code);
     const cites: any[] = []; for (const b of data.content || []) if (b.type === "text") for (const c of b.citations || []) if (c.url && !cites.find((x) => x.url === c.url)) cites.push({ title: c.title || c.url, url: c.url });
+    // pages the search actually returned (used when the reply itself carries no citations)
+    for (const b of data.content || []) if (b.type === "web_search_tool_result" && Array.isArray(b.content)) for (const x of b.content) if (x?.url && !cites.find((c) => c.url === x.url)) cites.push({ title: x.title || x.url, url: x.url });
     const text = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+    if (data.stop_reason === "max_tokens") throw new Error("الرد اتقطع (max_tokens)" + (errs.length ? ` · البحث فشل: ${errs.join("، ")}` : ""));
     const s = text.indexOf("{"), e = text.lastIndexOf("}");
-    if (s < 0) throw new Error("الرد ماكانش JSON" + (errs.length ? ` (البحث فشل: ${errs.join("، ")})` : ""));
+    if (s < 0 || e < s) throw new Error(`الرد ماكانش JSON (stop: ${data.stop_reason})` + (errs.length ? ` · البحث فشل: ${errs.join("، ")}` : ""));
     const o = JSON.parse(text.slice(s, e + 1));
     const sources = (Array.isArray(o.sources) ? o.sources : []).filter((x: any) => x?.url && cites.some((c) => c.url === x.url)).concat(cites).slice(0, 5);
     note = { owner_id: uid, day: cairoDay(), topic: String(o.topic || "").slice(0, 120), insight: String(o.insight || "").slice(0, 700), tips: (Array.isArray(o.tips) ? o.tips : []).map(String).slice(0, 5), sources: sources.filter((x: any, i: number, a: any[]) => a.findIndex((y) => y.url === x.url) === i), searches: usage.server_tool_use?.web_search_requests || 0, search_errors: errs, cost_usd: total };
