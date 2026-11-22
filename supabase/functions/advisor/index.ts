@@ -448,7 +448,8 @@ async function modeChat(ctx: Ctx, body: any) {
   const past = (hist || []).reverse();
   // the last 4 photos go back in as real images, so he never "forgets" what he saw
   const picsOf = (m: any): string[] => (m.image_paths && m.image_paths.length ? m.image_paths : m.image_path ? [m.image_path] : []);
-  const recentImgs = new Set(past.flatMap(picsOf).slice(-Math.max(0, 4 - imagePaths.length)));
+  const room = 4 - imagePaths.length; const allPics = past.flatMap(picsOf);
+  const recentImgs = new Set(room > 0 ? allPics.slice(-room) : []);
   const clean = (t: string) => String(t || "").replace(/\[\[ردود:[^\]]*\]\]/g, "").replace(/```card\s*([\s\S]*?)```/g, (_m, j) => { try { return "(كارت: " + JSON.parse(j).title + ")"; } catch { return ""; } }).trim();
   const messages: any[] = [];
   for (const m of past) {
