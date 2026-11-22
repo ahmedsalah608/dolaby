@@ -12,6 +12,7 @@ const P = {
   shirt: "M8 3 3 6l2 4 2-1v12h10V9l2 1 2-4-5-3c-.6 1.5-2.1 2.5-4 2.5S8.6 4.5 8 3z",
   pants: "M6 3h12l1.2 18h-5L12 10l-2.2 11h-5z",
   jacket: "M8 3 4 6v15h7V8zM16 3l4 3v15h-7V8zM8 3l4 5 4-5",
+  knit: "M9 3c.5 1.3 1.6 2 3 2s2.5-.7 3-2l5 3-1.5 5-2.5-1v11H8V10l-2.5 1L4 6zM8 18h8M10 18v3M14 18v3",
   shoe: "M3 17c0-3 1-7 3-9.5l3 3c2 1.2 5 1.3 8 2.2 2.2.6 4 2.1 4 4.3v1H3z",
   watch: "M9 3h6l1 4.2M9 3 8 7.2M8 16.8 9 21h6l1-4.2M12 7a5 5 0 1 0 0 10 5 5 0 1 0 0-10zM12 10v2.2l1.5 1",
   bottle: "M10 2.5h4V6h-4zM8 8h8a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zM7 13h10",
@@ -36,7 +37,7 @@ const P = {
   key: "M8 14a4 4 0 1 1 3.5-6H21v3h-2v3h-3v-3h-4.5A4 4 0 0 1 8 14z",
 };
 const ic = (n) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="${P[n]}"/></svg>`;
-const CATS = { top: ["قميص / تيشيرت", "shirt"], bottom: ["بنطلون", "pants"], outer: ["جاكيت / بدلة", "jacket"], shoes: ["جزمة", "shoe"], acc: ["إكسسوار / نضارة", "watch"], perfume: ["عطر", "bottle"] };
+const CATS = { top: ["قميص / تيشيرت", "shirt"], knit: ["بلوفر / سويتر", "knit"], bottom: ["بنطلون", "pants"], outer: ["جاكيت / بدلة", "jacket"], shoes: ["جزمة", "shoe"], acc: ["إكسسوار / نضارة", "watch"], perfume: ["عطر", "bottle"] };
 const SLOTS = [["flatFront", "مفرودة من الوش"], ["flatBack", "مفرودة من الضهر"], ["wornFront", "لابسها من الوش"], ["wornBack", "لابسها من الضهر"], ["tag", "التيكت"]];
 const PSLOT = [["bottle", "صوّر الزجاجة"]];
 const BODY = [["bodyFront", "من الوش"], ["bodySide", "من الجنب"], ["bodyBack", "من الضهر"]];

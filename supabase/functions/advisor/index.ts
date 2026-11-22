@@ -253,7 +253,7 @@ async function loadAll(ctx: Ctx) {
   ]);
   return { profile: p.data, meas: m.data || [], items: it.data || [], advisor: adv.data || { about: {}, goals: [] }, lessons: les.data || [], notes: (sn.data || []) as any[] };
 }
-const CAT: Record<string, string> = { top: "قميص/تيشيرت", bottom: "بنطلون", outer: "جاكيت/بدلة", shoes: "جزمة", acc: "إكسسوار", perfume: "عطر" };
+const CAT: Record<string, string> = { top: "قميص/تيشيرت", knit: "بلوفر/سويتر", bottom: "بنطلون", outer: "جاكيت/بدلة", shoes: "جزمة", acc: "إكسسوار", perfume: "عطر" };
 const VERD: Record<string, string> = { keep: "تفضل", tailor: "للخياط", remove: "تخرج" };
 function itemLine(i: any) {
   const d = i.data || {}; const a = i.analysis;
@@ -330,7 +330,7 @@ const TOOLS = [
   { name: "update_profile", description: "يحدّث ملف أحمد. fields: name, height_cm, glasses (true/false) أو أي معلومة تانية تتحط في data (زي job, events, style, perfumePrefs).", input_schema: { type: "object", properties: { fields: { type: "object" } }, required: ["fields"] } },
   { name: "get_measurements", description: "يجيب آخر المقاسات.", input_schema: { type: "object", properties: { limit: { type: "integer" } } } },
   { name: "add_measurement", description: "يسجل قياس جديد قاله أحمد بنفسه (سم/كجم). keys: chest, waist, shoulder, hips, neck, sleeve, inseam, weightKg, shoe.", input_schema: { type: "object", properties: { data: { type: "object" } }, required: ["data"] } },
-  { name: "list_items", description: "يجيب قطع الدولاب كلها أو نوع واحد.", input_schema: { type: "object", properties: { category: { type: "string", enum: ["top", "bottom", "outer", "shoes", "acc", "perfume"] } } } },
+  { name: "list_items", description: "يجيب قطع الدولاب كلها أو نوع واحد.", input_schema: { type: "object", properties: { category: { type: "string", enum: ["top", "knit", "bottom", "outer", "shoes", "acc", "perfume"] } } } },
   { name: "update_item", description: "يعدّل بيانات قطعة (name أو حقول data زي color, notes, season, occasions, pstatus, when).", input_schema: { type: "object", properties: { item_id: { type: "string" }, name: { type: "string" }, data: { type: "object" } }, required: ["item_id"] } },
   { name: "set_verdict", description: "يحفظ حكم على قطعة هدوم: keep أو tailor أو remove، مع السبب والتعديلات المطلوبة.", input_schema: { type: "object", properties: { item_id: { type: "string" }, verdict: { type: "string", enum: ["keep", "tailor", "remove"] }, reason: { type: "string" }, tailoring: { type: "array", items: { type: "object", properties: { what: { type: "string" }, why: { type: "string" }, reversible: { type: "boolean" } } } } }, required: ["item_id", "verdict", "reason"] } },
   { name: "save_lesson", description: "يحفظ قاعدة عامة قصيرة اتعلمتها من تصحيح أو تفضيل أحمد. استخدمها كل ما يصححك أو يقول تفضيل.", input_schema: { type: "object", properties: { rule: { type: "string" } }, required: ["rule"] } },
@@ -622,10 +622,10 @@ async function modeIdentify(ctx: Ctx, body: any) {
   const hint = body.category ? `أحمد قال إنها: ${String(body.category)}.` : "";
   const sys = "إنت خبير موضة وعطور. بتتعرف على القطعة اللي في الصورة بدقة. اقرا المكتوب على التيكت أو الزجاجة حرف بحرف. أي حاجة مش باينة أو مش متأكد منها سيبها فاضية، ما تخمنش ماركة أو اسم. رد بـJSON بس.";
   const prompt = `${hint}
-{"category":"top|bottom|outer|shoes|acc|perfume","name":"اسم قصير بالعربي أو اسم المنتج زي ما هو مكتوب","brand":"الماركة أو البيت لو مكتوبة بس","color":"اللون بالعربي","ptype":"أصلي|تركيبة|محلي أو فاضي","ml":0,"season":"كل المواسم|صيفي|شتوي","occasions":["شغل|سايت|خروج|رسمي|بيت|رياضة"],"notes":"وصف قصير للي باين (للعطر: نوع الريحة لو مكتوب)","read_text":"الكلام المكتوب في الصورة زي ما هو","confidence":"عالية|متوسطة|قليلة"}`;
+{"category":"top|knit|bottom|outer|shoes|acc|perfume","name":"اسم قصير بالعربي أو اسم المنتج زي ما هو مكتوب","brand":"الماركة أو البيت لو مكتوبة بس","color":"اللون بالعربي","ptype":"أصلي|تركيبة|محلي أو فاضي","ml":0,"season":"كل المواسم|صيفي|شتوي","occasions":["شغل|سايت|خروج|رسمي|بيت|رياضة"],"notes":"وصف قصير للي باين (للعطر: نوع الريحة لو مكتوب)","read_text":"الكلام المكتوب في الصورة زي ما هو","confidence":"عالية|متوسطة|قليلة"}`;
   const r = await runLoop(ctx, { model: MODELS.smart, system: sys, messages: [{ role: "user", content: [img, { type: "text", text: prompt }] }], tools: [], maxTokens: 700 });
   const o = parseJsonLoose(r.text);
-  const cats = ["top", "bottom", "outer", "shoes", "acc", "perfume"];
+  const cats = ["top", "knit", "bottom", "outer", "shoes", "acc", "perfume"];
   return { item: { category: cats.includes(o.category) ? o.category : (body.category || "top"), name: String(o.name || "").slice(0, 80), brand: String(o.brand || "").slice(0, 60), color: String(o.color || "").slice(0, 40), ptype: String(o.ptype || ""), ml: Number(o.ml) || null, season: ["كل المواسم", "صيفي", "شتوي"].includes(o.season) ? o.season : "كل المواسم", occasions: (Array.isArray(o.occasions) ? o.occasions : []).map(String).filter((x: string) => ["شغل", "سايت", "خروج", "رسمي", "بيت", "رياضة"].includes(x)), notes: String(o.notes || "").slice(0, 200), read_text: String(o.read_text || "").slice(0, 200), confidence: String(o.confidence || "") } };
 }
 
