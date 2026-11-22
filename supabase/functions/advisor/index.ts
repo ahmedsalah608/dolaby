@@ -62,11 +62,59 @@ type Ctx = {
   monthSpent: number; cap: number; searched: boolean; searchErrors: string[]; sources: { url: string; title: string }[];
   actions: { tool: string; input: unknown }[];
   emit?: (ev: Record<string, unknown>) => void;
+  live?: (ev: Record<string, unknown>) => void; // raw stream events (reply text as it is written)
+  after: (() => Promise<void>)[]; // background work that runs after the answer is sent
 };
 const TOOL_LABEL: Record<string, string> = { get_profile: "بيقرا ملفك", update_profile: "بيحدّث ملفك", get_measurements: "بيبص على مقاساتك", add_measurement: "بيسجّل مقاس", list_items: "بيبص على دولابك", update_item: "بيعدّل قطعة", set_verdict: "بيحفظ حكم على قطعة", save_lesson: "بيسجّل درس اتعلمه منك", update_about: "بيحدّث اللي يعرفه عنك", set_goals: "بيحدّث أهدافك" };
 
 // ---------- Anthropic call with all the guards ----------
-async function callClaude(ctx: Ctx, body: Record<string, unknown>) {
+// read Anthropic's SSE stream, rebuild the same message object the non-stream API returns
+async function readSSE(r: Response, onText?: (t: string) => void) {
+  const rd = r.body!.getReader(); const dec = new TextDecoder(); let buf = "";
+  const content: any[] = []; const partial: Record<number, string> = {};
+  let stop_reason = ""; let usage: any = {};
+  const handle = (ev: any) => {
+    switch (ev.type) {
+      case "message_start": usage = { ...(ev.message?.usage || {}) }; break;
+      case "content_block_start": content[ev.index] = { ...ev.content_block }; if (ev.content_block?.type === "tool_use" || ev.content_block?.type === "server_tool_use") partial[ev.index] = ""; break;
+      case "content_block_delta": {
+        const b = content[ev.index]; const d = ev.delta || {}; if (!b) break;
+        if (d.type === "text_delta") { b.text = (b.text || "") + d.text; onText?.(d.text); }
+        else if (d.type === "thinking_delta") b.thinking = (b.thinking || "") + d.thinking;
+        else if (d.type === "signature_delta") b.signature = d.signature;
+        else if (d.type === "input_json_delta") partial[ev.index] = (partial[ev.index] || "") + d.partial_json;
+        else if (d.type === "citations_delta") (b.citations ||= []).push(d.citation);
+        break;
+      }
+      case "content_block_stop": if (ev.index in partial) { const b = content[ev.index]; try { b.input = partial[ev.index] ? JSON.parse(partial[ev.index]) : {}; } catch { b.input = {}; b._broken = true; } delete partial[ev.index]; } break;
+      case "message_delta": if (ev.delta?.stop_reason) stop_reason = ev.delta.stop_reason; usage = { ...usage, ...(ev.usage || {}) }; break;
+      case "error": throw new AppError(ev.error?.type === "overloaded_error" ? "rate" : "api", "خطأ من Claude: " + (ev.error?.message || "stream error"), 502);
+    }
+  };
+  for (;;) {
+    const { value, done } = await rd.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      const line = chunk.split("\n").find((l) => l.startsWith("data:")); if (!line) continue;
+      let ev; try { ev = JSON.parse(line.slice(5)); } catch { continue; } handle(ev);
+    }
+  }
+  // a block cut off mid-stream (no stop) still holds its partial JSON
+  for (const k of Object.keys(partial)) { const b = content[Number(k)]; if (b) { b.input = {}; b._broken = true; } }
+  if (!stop_reason) stop_reason = "max_tokens"; // connection ended early: treat like a cut
+  return { content: content.filter(Boolean).map(({ _broken, ...b }) => b), stop_reason, usage, _cutTool: content.some((b) => b?._broken) };
+}
+
+async function callClaude(ctx: Ctx, body: Record<string, unknown>, onText?: (t: string) => void) {
+  // one moving cache breakpoint on the newest block, so each step of a tool loop re-reads the earlier ones cheaply
+  if (Array.isArray(body.messages) && body.messages.length) {
+    const msgs = body.messages as any[]; const last = msgs[msgs.length - 1];
+    const blocks = Array.isArray(last.content) ? last.content : [{ type: "text", text: String(last.content) }];
+    const lb = blocks[blocks.length - 1];
+    body = { ...body, messages: [...msgs.slice(0, -1), { ...last, content: [...blocks.slice(0, -1), { ...lb, cache_control: { type: "ephemeral" } }] }] };
+  }
+  const live = !!onText;
   const left = TIME_BUDGET_MS - (Date.now() - ctx.started);
   if (left < 8_000) throw new AppError("time", "out of time");
   if (ctx.monthSpent + ctx.usage.cost >= ctx.cap) throw new AppError("cap", `وصلت لحد الصرف الشهري (${ctx.cap} دولار). تقدر تزوده من الإعدادات.`, 402);
@@ -75,20 +123,27 @@ async function callClaude(ctx: Ctx, body: Record<string, unknown>) {
     r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": ctx.key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(live ? { ...body, stream: true } : body),
       signal: AbortSignal.timeout(left - 4_000),
     });
   } catch (e) {
     if ((e as Error).name === "TimeoutError") throw new AppError("time", "out of time");
     throw new AppError("network", "مش قادر أوصل لـClaude دلوقتي: " + (e as Error).message, 502);
   }
-  const data = await r.json().catch(() => ({}));
+  let data: any;
   if (!r.ok) {
+    data = await r.json().catch(() => ({}));
     const msg = data?.error?.message || r.statusText;
     if (r.status === 401) throw new AppError("bad_key", "المفتاح مش شغال (401). حط مفتاح جديد من الإعدادات.", 401);
     if (r.status === 429) throw new AppError("rate", "Claude مشغول أو وصلت لحد الطلبات (429). جرّب بعد دقيقة.", 429);
     if (/credit|balance/i.test(msg)) throw new AppError("credit", "رصيدك في Anthropic Console خلص: " + msg, 402);
     throw new AppError("api", `خطأ من Claude (${r.status}): ${msg}`, 502);
+  }
+  try { data = live ? await readSSE(r, onText) : await r.json(); }
+  catch (e) {
+    if (e instanceof AppError) throw e;
+    if ((e as Error).name === "TimeoutError") throw new AppError("time", "out of time");
+    throw new AppError("network", "الاتصال بـClaude اتقطع: " + (e as Error).message, 502);
   }
   const u = data.usage || {};
   const model = String(body.model);
@@ -121,8 +176,13 @@ const webSearchTool = (maxUses = 4) => ({
 });
 
 // Agent loop: runs tools, survives max_tokens/pause_turn, returns only the final answer.
-async function runLoop(ctx: Ctx, opts: { model: string; system: string; messages: any[]; tools: any[]; maxTokens: number }) {
+// system can be a string or [stable part, changing part]; both get cache breakpoints (tools are cached with them)
+type Sys = string | string[];
+const sysBlocks = (s: Sys) => (Array.isArray(s) ? s : [s]).filter(Boolean).map((text) => ({ type: "text", text, cache_control: { type: "ephemeral" } }));
+async function runLoop(ctx: Ctx, opts: { model: string; system: Sys; messages: any[]; tools: any[]; maxTokens: number; think?: "low" | "medium" | "high"; live?: boolean }) {
   const msgs = opts.messages;
+  let extra: Record<string, unknown> = opts.think ? { thinking: { type: "adaptive" }, output_config: { effort: opts.think } } : {};
+  const onText = opts.live && ctx.live ? (t: string) => ctx.live!({ type: "text", t }) : undefined;
   const pushUser = (blocks: any[]) => {
     const last = msgs[msgs.length - 1];
     if (last?.role === "user") { last.content = [...(Array.isArray(last.content) ? last.content : [{ type: "text", text: last.content }]), ...blocks]; }
@@ -132,9 +192,11 @@ async function runLoop(ctx: Ctx, opts: { model: string; system: string; messages
   for (let step = 0; step < 12; step++) {
     let data;
     try {
-      data = await callClaude(ctx, { model: opts.model, max_tokens: opts.maxTokens, system: opts.system, messages: msgs, tools: opts.tools });
+      data = await callClaude(ctx, { model: opts.model, max_tokens: opts.maxTokens, system: sysBlocks(opts.system), messages: msgs, ...(opts.tools.length ? { tools: opts.tools } : {}), ...extra }, onText);
     } catch (e) {
       if (e instanceof AppError && e.code === "time") return { text: finalText, stopped: true };
+      // safety net: if the API ever rejects the thinking settings, answer without them instead of failing
+      if (e instanceof AppError && e.code === "api" && Object.keys(extra).length && /thinking|effort|output_config/i.test(e.message)) { console.error("thinking rejected:", e.message); extra = {}; step--; continue; }
       throw e;
     }
     let content: any[] = data.content || [];
@@ -142,11 +204,13 @@ async function runLoop(ctx: Ctx, opts: { model: string; system: string; messages
     if (data.stop_reason === "max_tokens") {
       cutCount++;
       const last = content[content.length - 1];
-      const cutInTool = last && (last.type === "tool_use" || last.type === "server_tool_use");
-      if (cutInTool) content = content.slice(0, -1); // drop the unfinished tool call
+      const cutInTool = !!data._cutTool || (last && (last.type === "tool_use" || last.type === "server_tool_use"));
+      // drop unfinished blocks: a tool call cut mid-way, or thinking that never got its signature
+      while (content.length) { const b = content[content.length - 1]; if (b.type === "tool_use" || b.type === "server_tool_use" || (b.type === "thinking" && !b.signature)) content = content.slice(0, -1); else break; }
       if (content.length) msgs.push({ role: "assistant", content });
       if (!cutInTool) finalText += texts();
       if (cutCount > 3) return { text: finalText, stopped: true };
+      if (cutInTool && onText) ctx.live!({ type: "reset" });
       pushUser([{ type: "text", text: cutInTool
         ? "ردك اتقطع وإنت بتنادي أداة. كمّل الشغل بدفعات أصغر: أداة واحدة بمدخلات قصيرة في المرة."
         : "ردك اتقطع. كمّل من نفس المكان بالظبط من غير ما تكرر." }]);
@@ -167,6 +231,7 @@ async function runLoop(ctx: Ctx, opts: { model: string; system: string; messages
       }
       pushUser(results);
       finalText = ""; // only the answer after the last tool round is shown
+      if (onText) ctx.live!({ type: "reset" });
       continue;
     }
     finalText += texts();
@@ -251,7 +316,13 @@ const RULES = `إنت "لورينزو": خيّاط ومستشار مظهر إي�
 - ماتربطش الكلام بميزانية أو تحويش.
 - الصحة والوزن والأدوية: كلام عام بس، من غير أرقام أكل أو سعرات، وارجعه لدكتوره. النضارة الطبية قرارها عند دكتور العيون.
 - علّق على اللي باين في الصورة بس، من غير تخمين حاجات مش ظاهرة.
-- لما تغيّر بيانات بأداة، قول في جملة قصيرة إيه اللي اتغير.`;
+- لما تغيّر بيانات بأداة، قول في جملة قصيرة إيه اللي اتغير.
+ميزتك على أي مساعد عام إنك عارف أحمد ودولابه:
+- قبل ما ترشح حاجة، بص في دولابه ورشّح من القطع اللي عنده بالاسم الأول، وقول الناقص بس لو فعلاً ناقص.
+- لو بعت صورة لقطعة، قارنها باللي عنده (بتتلبس مع إيه، مكررة ولا لأ).
+- خلّي النصيحة مخصوصة ليه: مقاساته، طوله، شغله، مناسباته، أهدافه، والدروس اللي اتعلمتها منه. نصيحة تنفع أي حد = نصيحة ضعيفة.
+- لو مش متأكد، قول إنك مش متأكد واقترح إزاي نتأكد، بدل ما تخمّن بثقة.
+- لو السؤال محتاج معلومة حديثة (منتج، ترند، سعر)، ابحث.`;
 
 // ---------- tools the advisor may call ----------
 const TOOLS = [
@@ -332,13 +403,42 @@ async function imageBlock(ctx: Ctx, path: string) {
 }
 
 // ---------- modes ----------
+const HISTORY = 30; // messages sent in full; older ones live in a rolling summary
+async function chatExtras(ctx: Ctx) {
+  const [{ data: sum }, { data: fb }] = await Promise.all([
+    ctx.db.from("app_state").select("value").eq("owner_id", ctx.uid).eq("key", "chat_summary").maybeSingle(),
+    ctx.db.from("chat_messages").select("content,feedback").eq("owner_id", ctx.uid).eq("role", "assistant").not("feedback", "is", null).order("id", { ascending: false }).limit(12),
+  ]);
+  const FB: Record<string, string> = { repeat: "مكرر", long: "طويل", wrong: "غلط", lost: "مش فاهمني", generic: "عام ومش ليا" };
+  const fbLines = (fb || []).map((m: any) => {
+    const f = m.feedback || {}; const why = [FB[f.why] || "", f.note ? String(f.note).slice(0, 120) : ""].filter(Boolean).join(": ");
+    return `- ${f.v === "up" ? "👍 عجبه" : "👎 ماعجبهوش"}${why ? " (" + why + ")" : ""} — ردك كان: «${String(m.content || "").replace(/\s+/g, " ").slice(0, 140)}»`;
+  }).join("\n");
+  return {
+    summary: String(sum?.value?.text || ""), summaryUpto: Number(sum?.value?.upto_id || 0),
+    text: `ملخص المحادثات الأقدم (اللي مش ظاهرة تحت):\n${sum?.value?.text || "(مفيش لسه)"}\n\nتقييم أحمد لردودك الأخيرة (اتعلّم منه: كرر اللي عجبه وابعد عن اللي ماعجبهوش):\n${fbLines || "(لسه ماقيّمش)"}`,
+  };
+}
+// fold messages that fell out of the window into a short running summary (cheap model, after the reply is sent)
+async function updateSummary(ctx: Ctx, oldestShownId: number, prev: string, upto: number) {
+  const { data: rows } = await ctx.db.from("chat_messages").select("id,role,content,image_path").eq("owner_id", ctx.uid).gt("id", upto).lt("id", oldestShownId).order("id").limit(60);
+  if (!rows || rows.length < 10) return;
+  const convo = rows.map((m: any) => (m.role === "user" ? "أحمد: " : "لورينزو: ") + (m.image_path ? "[صورة] " : "") + String(m.content || "").replace(/\s+/g, " ").slice(0, 500)).join("\n");
+  const before = ctx.usage.cost;
+  const r = await callClaude(ctx, { model: MODELS.cheap, max_tokens: 900, system: "بتلخّص محادثة بين أحمد ومستشار الستايل بتاعه عشان المستشار يفتكرها. اكتب ملخص واحد محدّث بالعامية المصرية، نقط قصيرة: اللي أحمد قاله عن نفسه وتفضيلاته، القرارات، النصايح اللي اتقالت ورد فعله عليها، والحاجات اللي لسه مفتوحة. ما تضيفش حاجة ماتقالتش. ما تكتبش أي حاجة عن الصحة أو الأدوية. أقل من 1200 حرف.", messages: [{ role: "user", content: `الملخص القديم:\n${prev || "(مفيش)"}\n\nرسايل جديدة:\n${convo}` }] });
+  const text = (r.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("").trim().slice(0, 1500);
+  if (!text) return;
+  await ctx.db.from("app_state").upsert({ owner_id: ctx.uid, key: "chat_summary", value: { text, upto_id: rows[rows.length - 1].id, at: Date.now() }, updated_at: new Date().toISOString() });
+  await ctx.db.from("usage_log").insert({ owner_id: ctx.uid, kind: "summary", model: MODELS.cheap, cost_usd: ctx.usage.cost - before, ok: true });
+}
+
 async function modeChat(ctx: Ctx, body: any) {
   const text = String(body.text || "").trim().slice(0, 4000);
   const imagePath = body.image_path ? String(body.image_path) : null;
   if (!text && !imagePath) throw new AppError("empty", "اكتب رسالة أو ابعت صورة.");
   ctx.emit?.({ kind: "read", label: "بيبص على دولابك وملفك" });
-  const all = await loadAll(ctx);
-  const { data: hist } = await ctx.db.from("chat_messages").select("role,content,image_path,created_at").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(20);
+  const [all, ex] = await Promise.all([loadAll(ctx), chatExtras(ctx)]);
+  const { data: hist } = await ctx.db.from("chat_messages").select("id,role,content,image_path,created_at").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(HISTORY);
   // one reply at a time: if the last message is still waiting for its reply, don't start a second one
   const lastMsg = (hist || [])[0];
   if (lastMsg?.role === "user" && Date.now() - Date.parse(lastMsg.created_at) < 100_000) throw new AppError("busy", "لسه بيرد على رسالتك اللي فاتت. استنى ثواني وهيظهر الرد.", 409);
@@ -366,9 +466,10 @@ async function modeChat(ctx: Ctx, body: any) {
   cur.push({ type: "text", text: text || "(بعتلك صورة)" });
   const lastM = messages[messages.length - 1];
   if (lastM?.role === "user") lastM.content.push(...cur); else messages.push({ role: "user", content: cur });
-  const system = `${RULES}\n\n${lessonsText(all.lessons)}\n\n${contextText(all)}`;
+  if ((hist || []).length >= HISTORY) { const oldest = Number(hist![hist!.length - 1].id); if (oldest - ex.summaryUpto > 12) ctx.after.push(() => updateSummary(ctx, oldest, ex.summary, ex.summaryUpto)); }
+  const system = [`${RULES}\n\n${lessonsText(all.lessons)}`, `${contextText(all)}\n\n${ex.text}`];
   ctx.emit?.({ kind: "think", label: "بيفكر في الرد" });
-  const r = await runLoop(ctx, { model: MODELS.smart, system, messages, tools: [...TOOLS, webSearchTool(4)], maxTokens: 3000 });
+  const r = await runLoop(ctx, { model: MODELS.smart, system, messages, tools: [...TOOLS, webSearchTool(4)], maxTokens: 10000, think: "medium", live: true });
   ctx.emit?.({ kind: "write", label: "بيكتبلك الرد" });
   let reply = r.text.trim();
   if (r.stopped) reply = (reply ? reply + "\n\n" : "") + "وقفت قبل ما أخلص عشان الوقت. اكتب «كمل» وأنا هكمّل.";
@@ -381,8 +482,9 @@ async function modeChat(ctx: Ctx, body: any) {
 
 async function jsonJob(ctx: Ctx, model: string, prompt: string, images: any[] = [], withSearch = false, maxTokens = 3000) {
   const all = await loadAll(ctx);
-  const system = `${RULES}\n\n${lessonsText(all.lessons)}\n\n${contextText(all)}\n\nرد بـJSON بس، من غير أي كلام قبله أو بعده.`;
-  const r = await runLoop(ctx, { model, system, messages: [{ role: "user", content: [...images, { type: "text", text: prompt }] }], tools: withSearch ? [webSearchTool(5)] : [], maxTokens });
+  const system = [`${RULES}\n\n${lessonsText(all.lessons)}`, `${contextText(all)}\n\nرد بـJSON بس، من غير أي كلام قبله أو بعده.`];
+  const smart = model === MODELS.smart;
+  const r = await runLoop(ctx, { model, system, messages: [{ role: "user", content: [...images, { type: "text", text: prompt }] }], tools: withSearch ? [webSearchTool(5)] : [], maxTokens: smart ? maxTokens + 6000 : maxTokens, think: smart ? "medium" : undefined });
   if (r.stopped && !r.text) throw new AppError("time", "الشغل طوّل ووقفت. دوس تاني وقول «كمل».", 408);
   return { all, out: parseJsonLoose(r.text) };
 }
@@ -484,11 +586,11 @@ async function modeWeek(ctx: Ctx) {
 async function modeReview(ctx: Ctx, body: any) {
   const since = String(body.since || new Date(Date.now() - 7 * 864e5).toISOString());
   const [msgs, acts, les] = await Promise.all([
-    ctx.db.from("chat_messages").select("role,content,created_at").eq("owner_id", ctx.uid).gte("created_at", since).order("id").limit(120),
+    ctx.db.from("chat_messages").select("role,content,created_at,feedback").eq("owner_id", ctx.uid).gte("created_at", since).order("id").limit(120),
     ctx.db.from("activity").select("actor,kind,detail,created_at").eq("owner_id", ctx.uid).gte("created_at", since).order("id").limit(200),
     ctx.db.from("lessons").select("rule,created_at").eq("owner_id", ctx.uid).gte("created_at", since),
   ]);
-  const convo = (msgs.data || []).map((m: any) => (m.role === "user" ? "أحمد: " : "المستشار: ") + String(m.content).slice(0, 600)).join("\n").slice(0, 30000);
+  const convo = (msgs.data || []).map((m: any) => (m.role === "user" ? "أحمد: " : "المستشار: ") + String(m.content).slice(0, 600) + (m.feedback ? ` [تقييم أحمد: ${m.feedback.v === "up" ? "👍" : "👎"} ${m.feedback.why || ""} ${m.feedback.note || ""}]` : "")).join("\n").slice(0, 30000);
   const prompt = `ده كل اللي حصل من ${since} لحد دلوقتي. لخّص الأسبوع لمراجعة يوم الأحد:
 المحادثات:\n${convo || "(مفيش)"}
 الأفعال:\n${JSON.stringify(acts.data || []).slice(0, 12000)}
@@ -553,7 +655,7 @@ Deno.serve(async (req) => {
     ]);
     if (!sec?.anthropic_key) throw new AppError("no_key", "لسه ماحطيتش مفتاح Anthropic. روح ملفي ← الإعدادات.");
     const monthSpent = (spent || []).reduce((s: number, r: any) => s + Number(r.cost_usd || 0), 0);
-    const c: Ctx = { req, uid, db, key: sec.anthropic_key, started, usage: { model: "", in: 0, out: 0, cr: 0, cw: 0, searches: 0, cost: 0 }, monthSpent, cap: Number(st?.monthly_cap_usd ?? 5), searched: false, searchErrors: [], sources: [], actions: [] };
+    const c: Ctx = { req, uid, db, key: sec.anthropic_key, started, usage: { model: "", in: 0, out: 0, cr: 0, cw: 0, searches: 0, cost: 0 }, monthSpent, cap: Number(st?.monthly_cap_usd ?? 5), searched: false, searchErrors: [], sources: [], actions: [], after: [] };
     ctx = c;
     if (monthSpent >= c.cap) throw new AppError("cap", `وصلت لحد الصرف الشهري (${ctx.cap} دولار). تقدر تزوده من الإعدادات.`, 402);
     const handlers: Record<string, (c: Ctx, b: any) => Promise<unknown>> = { chat: modeChat, verdict: modeVerdict, report: modeReport, shop: modeShop, outfit: modeOutfit, assess: modeAssess, week: modeWeek, review: modeReview, learn: modeLearn, ping: modePing, identify: modeIdentify };
@@ -565,11 +667,15 @@ Deno.serve(async (req) => {
       const stream = new ReadableStream({ start(cc) { ctrl = cc; }, cancel() { closed = true; } });
       const send = (o: unknown) => { if (closed) return; try { ctrl.enqueue(enc.encode(JSON.stringify(o) + "\n")); } catch { closed = true; } };
       c.emit = (ev) => send({ type: "step", at: Date.now() - started, ...ev });
+      c.live = (ev) => send(ev);
       const work = (async () => {
         try {
           const result: any = await h(c, body);
           await logUsage(true);
           send({ type: "done", ok: true, model: c.usage.model, cost_usd: c.usage.cost, month_spent_usd: monthSpent + c.usage.cost, cap_usd: c.cap, ...result });
+          if (!closed) { try { ctrl.close(); } catch { /* closed */ } closed = true; }
+          c.started = Date.now();
+          for (const f of c.after) { try { await f(); } catch (e) { console.error("after", (e as Error).message); } }
         } catch (e) {
           const err = e instanceof AppError ? e : new AppError("server", "حصلت مشكلة: " + (e as Error).message, 500);
           if (c.usage.cost > 0) await logUsage(false, err.message);
@@ -583,6 +689,7 @@ Deno.serve(async (req) => {
     }
     const result: any = await h(c, body);
     await logUsage(true);
+    c.started = Date.now(); for (const f of c.after) { try { await f(); } catch (e) { console.error("after", (e as Error).message); } }
     return json(req, { ok: true, model: c.usage.model, cost_usd: c.usage.cost, month_spent_usd: monthSpent + c.usage.cost, cap_usd: c.cap, ...result });
   } catch (e) {
     const cx = ctx as Ctx | null;

@@ -442,11 +442,11 @@ function aChat() {
     const r = parseReply(t.content);
     const body = r.parts.map((p) => p.card ? cardHtml(p.card) : `<div class="lbub him">${md(p.text)}</div>`).join("") + r.videos.map(videoHtml).join("");
     const srcs = (t.meta?.sources || []).length ? `<details class="lsrc"><summary>المصادر (${t.meta.sources.length})</summary>${t.meta.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("")}</details>` : "";
-    const meta = `<span class="lmeta">${t.model ? esc(modelName(t.model)) : ""}${t.cost_usd != null ? ` · ‎${usd(t.cost_usd)}` : ""} · ${t.meta?.searched ? "من بحث على النت" : "من غير بحث"}</span>`;
+    const meta = `<div class="lfoot"><span class="lmeta">${t.model ? esc(modelName(t.model)) : ""}${t.cost_usd != null ? ` · ‎${usd(t.cost_usd)}` : ""} · ${t.meta?.searched ? "من بحث على النت" : "من غير بحث"}</span>${fbHtml(t)}</div>`;
     const chips = t === lastA && r.chips.length && S.busyKey !== "chat" && !S.adv.waiting ? `<div class="chips">${r.chips.map((x) => `<button class="chip" data-a="advAsk" data-q="${esc(x)}">${esc(x)}</button>`).join("")}</div>` : "";
     return sep + body + srcs + meta + chips;
   }).join("");
-  const busy = S.busyKey === "chat" ? thinkingCard() : S.adv.waiting ? `<div class="lthink"><div class="tstep cur"><span class="tdot"></span><span>بيكمّل ردّه على رسالتك اللي فاتت…</span></div></div>` : "";
+  const busy = S.busyKey === "chat" ? (S.adv.live ? liveBlock() : thinkingCard()) : S.adv.waiting ? `<div class="lthink"><div class="tstep cur"><span class="tdot"></span><span>بيكمّل ردّه على رسالتك اللي فاتت…</span></div></div>` : "";
   const locked = S.busyKey === "chat" || S.adv.waiting;
   const pv = S.prev["adv_photo"];
   return `<div class="lchat" id="lchat">${empty}${out}${busy}${errBox("chat")}</div>
@@ -455,6 +455,32 @@ function aChat() {
     <textarea data-scope="adv" data-b="msg" id="adv_msg" rows="1" placeholder="${locked ? "استنى لما يخلّص…" : `اكتب لـ${PERSONA.name}…`}" ${locked ? "disabled" : ""} class="linput">${esc(d.msg || "")}</textarea>
     ${S.busyKey === "chat" ? `<button class="lstop" data-a="advStop">وقّف</button>` : S.adv.waiting ? "" : `<button class="iconbtn lsend" data-a="advSend" aria-label="ابعت"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="transform:scaleX(-1)"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>`}</div></div>`;
 }
+// 👍/👎 on each reply; Lorenzo reads these in every chat and in the Sunday review
+const FB_WHY = { repeat: "مكرر", long: "طويل", wrong: "غلط", lost: "مش فاهمني", generic: "عام ومش ليا" };
+function fbHtml(t) {
+  if (typeof t.id !== "number") return "";
+  const f = t.feedback || {}; const open = S.adv.fbOpen === t.id;
+  const btn = (v, label, icon) => `<button class="lfb ${f.v === v ? "on" : ""}" data-a="fbMsg" data-id="${t.id}" data-v="${v}" aria-label="${label}" aria-pressed="${f.v === v}">${icon}</button>`;
+  const row = `${btn("up", "رد كويس", "👍")}${btn("down", "رد مش كويس", "👎")}${f.v === "down" && f.why && !open ? `<span class="lmeta">${esc(FB_WHY[f.why] || "")}</span>` : ""}`;
+  const ask = open ? `<div class="lfb-ask"><span class="sub xs">إيه اللي ماعجبكش؟</span><div class="chips">${Object.entries(FB_WHY).map(([k, v]) => `<button class="chip ${f.why === k ? "on" : ""}" data-a="fbWhy" data-id="${t.id}" data-w="${k}">${v}</button>`).join("")}</div>
+    <div class="row" style="flex-wrap:nowrap;gap:6px"><input data-scope="adv" data-b="fbnote" placeholder="كلمة كمان (اختياري)" value="${esc(S.adv.d.fbnote || f.note || "")}" style="flex:1"><button class="btn" style="min-height:36px;padding:0 14px" data-a="fbSave" data-id="${t.id}">تمام</button></div></div>` : "";
+  return `<span class="lfbs">${row}</span>${ask}`;
+}
+async function setFeedback(id, patch) {
+  const m = S.chat.find((x) => x.id === id); if (!m) return;
+  const fb = patch === null ? null : { ...(m.feedback || {}), ...patch, at: Date.now() };
+  const old = m.feedback; m.feedback = fb; render();
+  try { await q(sb.from("chat_messages").update({ feedback: fb }).eq("id", id)); }
+  catch (e) { m.feedback = old; render(); toast("التقييم ماتحفظش: " + e.message); }
+}
+// text that streams in while he writes: hide half-written cards/markers until they are complete
+function liveHtml(t) {
+  t = String(t || ""); const fences = t.split("```").length - 1; if (fences % 2) t = t.slice(0, t.lastIndexOf("```"));
+  const open = t.lastIndexOf("[["); if (open >= 0 && t.indexOf("]]", open) < 0) t = t.slice(0, open);
+  const r = parseReply(t);
+  return r.parts.map((p) => p.card ? cardHtml(p.card) : `<div class="lbub him">${md(p.text)}</div>`).join("") || "";
+}
+function liveBlock() { return `<div id="advLive" class="llive">${liveHtml(S.adv.live)}</div><div class="lthink lmini" role="status"><div class="tstep cur"><span class="tdot"></span><span>بيكتب…</span></div></div>`; }
 function thinkingCard() {
   const st = S.adv.steps; const secs = Math.round((Date.now() - S.adv.started) / 1000);
   const rows = st.map((s, i) => { const cur = i === st.length - 1;
@@ -465,7 +491,7 @@ function thinkingCard() {
 let advTimerId = null;
 function startAdvTimer() { clearInterval(advTimerId); advTimerId = setInterval(() => { const el = $("#advTimer"); if (!el || S.busyKey !== "chat") { clearInterval(advTimerId); return; } el.textContent = `بقالي ${Math.round((Date.now() - S.adv.started) / 1000)} ثانية`; }, 1000); }
 
-async function aiStream(mode, payload, onStep, signal) {
+async function aiStream(mode, payload, onStep, signal, onLive) {
   const doFetch = window.DOLABY_STUB?.streamFetch || fetch;
   const { data } = await sb.auth.getSession(); const token = data.session?.access_token;
   const r = await doFetch(`${CFG.url}/functions/v1/advisor`, { method: "POST", signal, headers: { "Content-Type": "application/json", apikey: CFG.key, Authorization: `Bearer ${token}` }, body: JSON.stringify({ mode, stream: true, ...payload }) });
@@ -474,7 +500,7 @@ async function aiStream(mode, payload, onStep, signal) {
   const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = "", fin = null;
   for (;;) {
     const { value, done } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true });
-    let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; let ev; try { ev = JSON.parse(line); } catch { continue; } if (ev.type === "step") onStep(ev); else fin = ev; }
+    let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; let ev; try { ev = JSON.parse(line); } catch { continue; } if (ev.type === "step") onStep(ev); else if (ev.type === "text" || ev.type === "reset") onLive?.(ev); else fin = ev; }
   }
   if (!fin) throw fail({ message: "الاتصال اتقطع قبل ما الرد يوصل. هيتحفظ لما يخلص، افتح الشات بعد شوية." });
   if (fin.type === "error") throw fail(fin);
@@ -494,7 +520,7 @@ async function reloadChat() { try { S.chat = (await q(sb.from("chat_messages").s
 async function advSend(qtext) {
   if (S.busyKey || S.adv.waiting) return; const d = S.adv.d; const text = String(qtext ?? d.msg ?? "").trim(); const blob = S.pending["adv_photo"];
   if (!text && !blob) return;
-  S.busyKey = "chat"; S.lastErr.chat = null; S.adv.steps = []; S.adv.started = Date.now();
+  S.busyKey = "chat"; S.lastErr.chat = null; S.adv.steps = []; S.adv.started = Date.now(); S.adv.live = "";
   let image_path = null;
   try { if (blob) image_path = await upload(blob, "chat"); } catch (e) { S.busyKey = null; toast("الصورة ماترفعتش: " + e.message); render(); return; }
   S.chat.push({ role: "user", content: text, image_path, id: "tmp", created_at: new Date().toISOString() }); d.msg = ""; delete S.pending["adv_photo"]; delete S.prev["adv_photo"];
@@ -503,10 +529,16 @@ async function advSend(qtext) {
   try {
     const r = await aiStream("chat", { text, image_path }, (ev) => {
       if (S.adv.steps.at(-1)?.label === ev.label && !ev.detail) return;
-      S.adv.steps.push(ev); const box = $(".lthink"); if (box) { box.outerHTML = thinkingCard(); scrollChat(); }
+      S.adv.steps.push(ev); const box = $(".lthink"); if (box && !S.adv.live) { box.outerHTML = thinkingCard(); scrollChat(); }
       const st = $("#advStatus"); if (st) st.textContent = ev.label + "…";
-    }, S.adv.ctl.signal);
-    S.chat.push({ role: "assistant", content: r.reply, model: r.model, cost_usd: r.cost_usd, created_at: new Date().toISOString(), meta: { searched: r.searched, sources: r.sources, actions: r.actions, searchErrors: r.searchErrors } });
+    }, S.adv.ctl.signal, (ev) => {
+      const had = !!S.adv.live;
+      S.adv.live = ev.type === "reset" ? "" : S.adv.live + ev.t;
+      if (had !== !!S.adv.live) { render(); scrollChat(); return; } // switch between steps card and live text
+      if (liveRaf) return; liveRaf = requestAnimationFrame(() => { liveRaf = 0; const el = $("#advLive"); if (el) { const near = window.innerHeight + window.scrollY >= document.body.scrollHeight - 120; el.innerHTML = liveHtml(S.adv.live); if (near) scrollChat(); } });
+      const stt = $("#advStatus"); if (stt) stt.textContent = "بيكتب…";
+    });
+    S.chat.push({ id: r.id, role: "assistant", content: r.reply, model: r.model, cost_usd: r.cost_usd, created_at: new Date().toISOString(), meta: { searched: r.searched, sources: r.sources, actions: r.actions, searchErrors: r.searchErrors } });
     reloadPart("usage");
     if ((r.actions || []).length) { reloadPart("items"); reloadPart("advisor"); reloadPart("lessons"); reloadPart("profile"); reloadPart("meas"); }
     const userN = S.chat.filter((m) => m.role === "user").length;
@@ -514,8 +546,9 @@ async function advSend(qtext) {
   } catch (e) {
     if (e.name === "AbortError" || e.code === "busy") { toast(e.code === "busy" ? e.message : "وقّفت المتابعة. الرد لسه بيتكتب وهيظهر هنا."); waitForReply(); }
     else S.lastErr.chat = e.message;
-  } finally { S.busyKey = null; S.adv.ctl = null; clearInterval(advTimerId); render(); scrollChat(); }
+  } finally { S.busyKey = null; S.adv.ctl = null; S.adv.live = ""; clearInterval(advTimerId); render(); scrollChat(); }
 }
+let liveRaf = 0;
 function scrollChat() { if (S.tab === "advisor") requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
 
 /* ---- Lorenzo's file (atelier sheet): plan, evaluation, what he knows, lessons, fashion notes ---- */
@@ -884,6 +917,11 @@ document.addEventListener("click", async (e) => {
     case "atelierGo": S.sheet.view = a.dataset.v; renderSheet(); $("#sheet .sheet-body") && ($("#sheet .sheet-body").scrollTop = 0); break;
     case "atelierHome": S.sheet.view = "home"; renderSheet(); break;
     case "advStop": S.adv.ctl?.abort(); break;
+    case "fbMsg": { const id = +a.dataset.id; const v = a.dataset.v; const m = S.chat.find((x) => x.id === id); if (!m) break;
+      if (m.feedback?.v === v) { S.adv.fbOpen = null; setFeedback(id, null); break; }
+      S.adv.fbOpen = v === "down" ? id : null; S.adv.d.fbnote = ""; setFeedback(id, { v, why: v === "down" ? m.feedback?.why : undefined }); if (v === "up") toast(`${PERSONA.name} هياخد باله إن ده عجبك`); break; }
+    case "fbWhy": setFeedback(+a.dataset.id, { why: a.dataset.w }); break;
+    case "fbSave": { const id = +a.dataset.id; const note = String(S.adv.d.fbnote || "").trim().slice(0, 200); S.adv.fbOpen = null; S.adv.d.fbnote = ""; await setFeedback(id, note ? { note } : {}); toast("اتسجّل. هيتعلم منه في الرد الجاي"); break; }
     case "restudio": restudio(s.id); break;
     case "learnSave": { const v = num(s.d.dcap); if (v == null || v < 0 || v > 1) { toast("اكتب رقم من 0 لـ1 دولار"); break; }
       try { await q(sb.from("settings").update({ daily_learn: s.d.dlearn !== "off", daily_learn_cap_usd: v, updated_at: new Date().toISOString() }).eq("owner_id", uid())); await reloadPart("settings"); toast("اتحفظ"); renderSheet(); } catch (er) { toast("ماتحفظش: " + er.message); } break; }
