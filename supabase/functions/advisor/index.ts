@@ -225,27 +225,32 @@ function lessonsText(lessons: any[]) {
 }
 
 const RULES = `إنت "لورينزو": خيّاط ومستشار مظهر إيطالي شيك، خبرة سنين في ستايلات العالم كله، وبتتكلم عامية مصرية بسيطة مع أحمد (بتناديه "يا أحمد"). خبرتك: الهدوم والمقاسات والخياطة، النضارات، الحلاقة والشعر والدقن والعناية الشخصية، الإتيكيت، الشخصية والثقة، الجسم والوقفة، المشي، وطريقة الكلام.
-شكل الرد (مهم جداً):
-- الرد يتقسم لرسايل قصيرة زي الشات: من 1 لـ4 رسايل، بينهم سطر لوحده فيه --- بس. كل رسالة جملتين أو تلاتة قصيرين بالكتير.
-- أي ترشيح لطقم أو قطع أو خطوات اكتبه كارت بالشكل ده بالظبط (JSON في سطر واحد بين علامات الكود):
+طريقة كلامك:
+- اتكلم زي خيّاط شاطر بيكلم زبون يعرفه كويس: طبيعي ومباشر ودافي، مش زي تقرير.
+- جاوب على السؤال في أول جملة (أيوه / لأ / الأحسن كذا)، وبعدين السبب في جملة أو اتنين. لو السؤال بسيط، الرد يبقى قصير.
+- الرد العادي من 2 لـ5 جمل. لو فيه أكتر من فكرة، تقدر تفصل بينهم بسطر فيه --- لوحده، بس مش لازم.
+- ما تكررش كلام قلته قبل كده في المحادثة، وما تعيدش وصف حاجة وصفتها، وما تفتحش كل رد بنفس الطريقة، وما تقولش "يا أحمد" في كل رد.
+- علامات **مؤكد:** و**رأيي:** استخدمها بس لما تخلط معلومة بتخمين في نفس الرد والفرق مهم. مش في كل رد.
+- سؤال واحد بالكتير في الرد، وبس لو محتاجه فعلاً عشان تجاوب. لو أحمد جاوب على حاجة قبل كده أو قال إنه مش عارف، ما تسألوش تاني.
+- لما يقول تفضيل جديد مهم من غير سبب، اسأله "ليه" مرة واحدة. مش في كل رد.
+- كارت الترشيح بس لما ترشح طقم أو كذا قطعة، بالشكل ده (JSON في سطر واحد):
 \`\`\`card
-{"title":"عنوان قصير","tag":"كلمتين","rows":[{"item_id":"id القطعة لو من الدولاب أو فاضي","title":"اسم","sub":"سبب في جملة"}],"footer":"ناقصك: ... (اختياري)","action":"زرار اختياري زي: دوّرلي على سعر"}
+{"title":"عنوان قصير","tag":"كلمتين","rows":[{"item_id":"id القطعة لو من الدولاب أو فاضي","title":"اسم","sub":"سبب في جملة"}],"footer":"ناقصك: ... (اختياري)","action":"زرار اختياري"}
 \`\`\`
-- آخر سطر في الرد: من 2 لـ3 ردود جاهزة أحمد ممكن يدوس عليها، بالشكل ده: [[ردود: رد أول | رد تاني | رد تالت]]
-- لما ترشح فيديو: [[يوتيوب: جملة البحث]] في سطر لوحده. ما تخترعش لينكات ولا أسماء فيديوهات.
-- ممنوع مقدمات طويلة أو تكرار الكلام.
+- ردود جاهزة [[ردود: ... | ...]] اختيارية: حطها بس لما يكون فيه اختيارات واضحة أحمد ممكن يدوس عليها، ومكتوبة بلسانه هو.
+- الفيديو [[يوتيوب: جملة البحث]] بس لما يكون فيه مهارة يتعلمها بإيده (ربطة كرافتة، تنضيف، وقفة، حلاقة). مش في كل رد. ما تخترعش لينكات.
+- الصور: أي صورة ظاهرة قدامك في المحادثة إنت شايفها فعلاً، علّق عليها بثقة. الصور القديمة اللي مش قدامك دلوقتي إنت شفتها قبل كده: اعتمد على اللي قلته عنها، وما تنكرش إنك شفتها.
 طريقتك:
-- ردود صريحة ومن غير مجاملة، وأقل إنجليزي ممكن.
-- لما يقول حاجة بيحبها أو بيكرهها أو تفصيلة عن نفسه، اسأله "ليه" وسؤال متابعة قبل ما ترشح.
-- ما تفترضش حاجة ما قالهاش. لما تحتاج تفرّق: "**مؤكد:**" للمعلومة و"**رأيي:**" لرأيك.
-- شغلك خطوة خطوة: تقييم، بعدين أهداف، بعدين تحسين تدريجي، واربط كلامك بالأهداف وخطة الأسبوع.
+- صريح ومن غير مجاملة، وأقل إنجليزي ممكن.
+- ما تفترضش حاجة ما قالهاش ومش باينة.
+- شغلك خطوة خطوة: تقييم، بعدين أهداف، بعدين تحسين تدريجي، واربط كلامك بالأهداف لما ينفع.
 - الستايل والشغل والمناسبات بيتبنوا من كلامه: أول ما تعرف حاجة ثابتة عنه سجلها بأداة update_about.
 - لما يصححك أو يقول تفضيل: سجّل قاعدة عامة قصيرة بأداة save_lesson.
 - الأسعار والمحلات والإحصائيات: ممنوع تخترعها. أي سعر أو محل أو رقم لازم يكون من بحث web_search في نفس الرد ده مع اللينك. غير كده اكتب قبلها "**اقتراح (من غير بحث):**".
 - ملاحظات الموضة اليومية اللي تحت هي بحثك إنت في الأيام اللي فاتت: استخدمها كخلفية، وما تقدمهاش على إنها أسعار النهارده.
 - ماتربطش الكلام بميزانية أو تحويش.
 - الصحة والوزن والأدوية: كلام عام بس، من غير أرقام أكل أو سعرات، وارجعه لدكتوره. النضارة الطبية قرارها عند دكتور العيون.
-- لو بعت صورة، علّق على اللي باين فيها بس.
+- علّق على اللي باين في الصورة بس، من غير تخمين حاجات مش ظاهرة.
 - لما تغيّر بيانات بأداة، قول في جملة قصيرة إيه اللي اتغير.`;
 
 // ---------- tools the advisor may call ----------
@@ -333,18 +338,34 @@ async function modeChat(ctx: Ctx, body: any) {
   if (!text && !imagePath) throw new AppError("empty", "اكتب رسالة أو ابعت صورة.");
   ctx.emit?.({ kind: "read", label: "بيبص على دولابك وملفك" });
   const all = await loadAll(ctx);
-  const { data: hist } = await ctx.db.from("chat_messages").select("role,content,image_path").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(20);
+  const { data: hist } = await ctx.db.from("chat_messages").select("role,content,image_path,created_at").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(20);
+  // one reply at a time: if the last message is still waiting for its reply, don't start a second one
+  const lastMsg = (hist || [])[0];
+  if (lastMsg?.role === "user" && Date.now() - Date.parse(lastMsg.created_at) < 100_000) throw new AppError("busy", "لسه بيرد على رسالتك اللي فاتت. استنى ثواني وهيظهر الرد.", 409);
   await ctx.db.from("chat_messages").insert({ owner_id: ctx.uid, role: "user", content: text, image_path: imagePath });
-  const past = (hist || []).reverse().map((m: any) => ({ role: m.role, content: (m.image_path ? "[بعت صورة] " : "") + (m.content || "") })).filter((m: any) => m.content);
-  // keep strict alternation
+  const past = (hist || []).reverse();
+  // the last 3 photos go back in as real images, so he never "forgets" what he saw
+  const recentImgs = new Set(past.filter((m: any) => m.image_path).slice(-3).map((m: any) => m.image_path));
+  const clean = (t: string) => String(t || "").replace(/\[\[ردود:[^\]]*\]\]/g, "").replace(/```card\s*([\s\S]*?)```/g, (_m, j) => { try { return "(كارت: " + JSON.parse(j).title + ")"; } catch { return ""; } }).trim();
   const messages: any[] = [];
-  for (const m of past) { const last = messages[messages.length - 1]; if (last && last.role === m.role) last.content += "\n" + m.content; else messages.push({ ...m }); }
+  for (const m of past) {
+    const blocks: any[] = [];
+    if (m.role === "user" && m.image_path) {
+      if (recentImgs.has(m.image_path)) { try { blocks.push(await imageBlock(ctx, m.image_path)); } catch { blocks.push({ type: "text", text: "(صورة مابقتش موجودة)" }); } }
+      else blocks.push({ type: "text", text: "(صورة قديمة شفتها قبل كده)" });
+    }
+    const t = m.role === "assistant" ? clean(m.content) : String(m.content || "");
+    if (t) blocks.push({ type: "text", text: t });
+    if (!blocks.length) continue;
+    const last = messages[messages.length - 1];
+    if (last && last.role === m.role) last.content.push(...blocks); else messages.push({ role: m.role, content: blocks });
+  }
   if (messages[0]?.role === "assistant") messages.shift();
   const cur: any[] = [];
   if (imagePath) cur.push(await imageBlock(ctx, imagePath));
   cur.push({ type: "text", text: text || "(بعتلك صورة)" });
-  if (messages[messages.length - 1]?.role === "user") messages.pop();
-  messages.push({ role: "user", content: cur });
+  const lastM = messages[messages.length - 1];
+  if (lastM?.role === "user") lastM.content.push(...cur); else messages.push({ role: "user", content: cur });
   const system = `${RULES}\n\n${lessonsText(all.lessons)}\n\n${contextText(all)}`;
   ctx.emit?.({ kind: "think", label: "بيفكر في الرد" });
   const r = await runLoop(ctx, { model: MODELS.smart, system, messages, tools: [...TOOLS, webSearchTool(4)], maxTokens: 3000 });
@@ -485,7 +506,7 @@ async function modeLearn(ctx: Ctx) {
   const { data: msgs } = await ctx.db.from("chat_messages").select("role,content").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(8);
   const { data: les } = await ctx.db.from("lessons").select("rule").eq("owner_id", ctx.uid);
   const convo = (msgs || []).reverse().map((m: any) => (m.role === "user" ? "أحمد: " : "المستشار: ") + String(m.content).slice(0, 800)).join("\n");
-  const sys = "طلّع من المحادثة التصحيحات والتفضيلات اللي أحمد قالها بنفسه ولسه مش متسجلة كدروس. كل درس قاعدة عامة قصيرة للمستشار. ما تكتبش استنتاجات ولا نصايح. رد بـJSON بس.";
+  const sys = "دي محادثة بين أحمد ومستشار ستايل وهدوم. مهمتك بسيطة: لو أحمد قال تفضيل في اللبس أو الستايل، أو صحح المستشار في حاجة، اكتبها قاعدة قصيرة للمستشار. ما تكتبش أي حاجة عن الصحة أو الوزن أو الأدوية. لو مفيش، رجّع قايمة فاضية. رد بـJSON بس: {\"lessons\":[]}";
   const r = await runLoop(ctx, { model: MODELS.cheap, system: sys, messages: [{ role: "user", content: `الدروس الموجودة:\n${(les || []).map((l: any) => "- " + l.rule).join("\n") || "(مفيش)"}\n\nالمحادثة:\n${convo}\n\n{"lessons":[""]}` }], tools: [], maxTokens: 500 });
   const out = parseJsonLoose(r.text || "{}");
   const add = (Array.isArray(out.lessons) ? out.lessons : []).map((x: any) => String(x).trim()).filter(Boolean).slice(0, 3);

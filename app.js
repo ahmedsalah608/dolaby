@@ -443,16 +443,17 @@ function aChat() {
     const body = r.parts.map((p) => p.card ? cardHtml(p.card) : `<div class="lbub him">${md(p.text)}</div>`).join("") + r.videos.map(videoHtml).join("");
     const srcs = (t.meta?.sources || []).length ? `<details class="lsrc"><summary>المصادر (${t.meta.sources.length})</summary>${t.meta.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("")}</details>` : "";
     const meta = `<span class="lmeta">${t.model ? esc(modelName(t.model)) : ""}${t.cost_usd != null ? ` · ‎${usd(t.cost_usd)}` : ""} · ${t.meta?.searched ? "من بحث على النت" : "من غير بحث"}</span>`;
-    const chips = t === lastA && r.chips.length && S.busyKey !== "chat" ? `<div class="chips">${r.chips.map((x) => `<button class="chip" data-a="advAsk" data-q="${esc(x)}">${esc(x)}</button>`).join("")}</div>` : "";
+    const chips = t === lastA && r.chips.length && S.busyKey !== "chat" && !S.adv.waiting ? `<div class="chips">${r.chips.map((x) => `<button class="chip" data-a="advAsk" data-q="${esc(x)}">${esc(x)}</button>`).join("")}</div>` : "";
     return sep + body + srcs + meta + chips;
   }).join("");
-  const busy = S.busyKey === "chat" ? thinkingCard() : "";
+  const busy = S.busyKey === "chat" ? thinkingCard() : S.adv.waiting ? `<div class="lthink"><div class="tstep cur"><span class="tdot"></span><span>بيكمّل ردّه على رسالتك اللي فاتت…</span></div></div>` : "";
+  const locked = S.busyKey === "chat" || S.adv.waiting;
   const pv = S.prev["adv_photo"];
   return `<div class="lchat" id="lchat">${empty}${out}${busy}${errBox("chat")}</div>
    <div class="composer lcomp">${pv ? `<div class="row" style="gap:8px"><img src="${pv}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:10px"><button class="btn text" data-a="advPhotoX">شيل الصورة</button></div>` : ""}
-    <div class="row" style="flex-wrap:nowrap;align-items:flex-end;gap:8px"><label class="iconbtn lcam" style="position:relative;overflow:hidden" aria-label="ابعت صورة">${ic("cam")}<input type="file" accept="image/*" data-slot="adv_photo" style="position:absolute;inset:0;opacity:0" ${S.busyKey === "chat" ? "disabled" : ""}></label>
-    <textarea data-scope="adv" data-b="msg" id="adv_msg" rows="1" placeholder="${S.busyKey === "chat" ? "استنى لما يخلّص…" : `اكتب لـ${PERSONA.name}…`}" ${S.busyKey === "chat" ? "disabled" : ""} class="linput">${esc(d.msg || "")}</textarea>
-    ${S.busyKey === "chat" ? `<button class="lstop" data-a="advStop">وقّف</button>` : `<button class="iconbtn lsend" data-a="advSend" aria-label="ابعت"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="transform:scaleX(-1)"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>`}</div></div>`;
+    <div class="row" style="flex-wrap:nowrap;align-items:flex-end;gap:8px"><label class="iconbtn lcam" style="position:relative;overflow:hidden" aria-label="ابعت صورة">${ic("cam")}<input type="file" accept="image/*" data-slot="adv_photo" style="position:absolute;inset:0;opacity:0" ${locked ? "disabled" : ""}></label>
+    <textarea data-scope="adv" data-b="msg" id="adv_msg" rows="1" placeholder="${locked ? "استنى لما يخلّص…" : `اكتب لـ${PERSONA.name}…`}" ${locked ? "disabled" : ""} class="linput">${esc(d.msg || "")}</textarea>
+    ${S.busyKey === "chat" ? `<button class="lstop" data-a="advStop">وقّف</button>` : S.adv.waiting ? "" : `<button class="iconbtn lsend" data-a="advSend" aria-label="ابعت"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="transform:scaleX(-1)"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>`}</div></div>`;
 }
 function thinkingCard() {
   const st = S.adv.steps; const secs = Math.round((Date.now() - S.adv.started) / 1000);
@@ -479,9 +480,19 @@ async function aiStream(mode, payload, onStep, signal) {
   if (fin.type === "error") throw fail(fin);
   return fin;
 }
+// after "stop" (or a message sent while he is still answering): wait for that reply instead of starting a second one
+async function waitForReply() {
+  if (S.adv.waiting) return; S.adv.waiting = true; render();
+  const until = Date.now() + 110000;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 4000)); await reloadChat();
+    if (S.chat.at(-1)?.role === "assistant") break;
+  }
+  S.adv.waiting = false; render(); scrollChat();
+}
 async function reloadChat() { try { S.chat = (await q(sb.from("chat_messages").select("*").order("id", { ascending: false }).limit(80))).reverse(); if (S.tab === "advisor") { render(); scrollChat(); } } catch {} }
 async function advSend(qtext) {
-  if (S.busyKey) return; const d = S.adv.d; const text = String(qtext ?? d.msg ?? "").trim(); const blob = S.pending["adv_photo"];
+  if (S.busyKey || S.adv.waiting) return; const d = S.adv.d; const text = String(qtext ?? d.msg ?? "").trim(); const blob = S.pending["adv_photo"];
   if (!text && !blob) return;
   S.busyKey = "chat"; S.lastErr.chat = null; S.adv.steps = []; S.adv.started = Date.now();
   let image_path = null;
@@ -501,7 +512,7 @@ async function advSend(qtext) {
     const userN = S.chat.filter((m) => m.role === "user").length;
     if (userN % 4 === 0) ai("learn").then((x) => { if (x.added?.length) { reloadPart("lessons"); toast(`${PERSONA.name} اتعلم ${x.added.length} حاجة جديدة عنك`); } }).catch(() => {});
   } catch (e) {
-    if (e.name === "AbortError") { toast("وقّفت المتابعة. لو الرد خلص هيظهر هنا."); setTimeout(reloadChat, 25000); setTimeout(reloadChat, 70000); }
+    if (e.name === "AbortError" || e.code === "busy") { toast(e.code === "busy" ? e.message : "وقّفت المتابعة. الرد لسه بيتكتب وهيظهر هنا."); waitForReply(); }
     else S.lastErr.chat = e.message;
   } finally { S.busyKey = null; S.adv.ctl = null; clearInterval(advTimerId); render(); scrollChat(); }
 }
