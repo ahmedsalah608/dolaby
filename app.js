@@ -439,7 +439,7 @@ function aChat() {
   const out = turns.slice(-40).map((t) => {
     const day = t.created_at ? cairoDay(Date.parse(t.created_at)) : cairoDay(); let sep = "";
     if (day !== lastDay) { lastDay = day; sep = `<span class="dsep">${day === cairoDay() ? "النهارده" : fmtD(Date.parse(day + "T12:00:00Z"))}</span>`; }
-    if (t.role === "user") return `${sep}<div class="lbub me">${t.image_path ? img(t.image_path) : ""}${t.content ? `<div>${esc(t.content).replace(/\n/g, "<br>")}</div>` : ""}</div>`;
+    if (t.role === "user") { const ims = (t.image_paths && t.image_paths.length ? t.image_paths : t.image_path ? [t.image_path] : []); return `${sep}<div class="lbub me">${ims.length ? `<div class="lbimgs n${Math.min(ims.length, 4)}">${ims.map((p) => img(p)).join("")}</div>` : ""}${t.content ? `<div>${esc(t.content).replace(/\n/g, "<br>")}</div>` : ""}</div>`; }
     const r = parseReply(t.content);
     const body = r.parts.map((p) => p.card ? cardHtml(p.card) : `<div class="lbub him">${md(p.text)}</div>`).join("") + r.videos.map(videoHtml).join("");
     const srcs = (t.meta?.sources || []).length ? `<details class="lsrc"><summary>المصادر (${t.meta.sources.length})</summary>${t.meta.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("")}</details>` : "";
@@ -449,10 +449,10 @@ function aChat() {
   }).join("");
   const busy = S.busyKey === "chat" ? (S.adv.live ? liveBlock() : thinkingCard()) : S.adv.waiting ? `<div class="lthink"><div class="tstep cur"><span class="tdot"></span><span>بيكمّل ردّه على رسالتك اللي فاتت…</span></div></div>` : "";
   const locked = S.busyKey === "chat" || S.adv.waiting;
-  const pv = S.prev["adv_photo"];
+  const pics = S.advImgs || [];
   return `<div class="lchat" id="lchat">${empty}${out}${busy}${errBox("chat")}</div>
-   <div class="composer lcomp">${pv ? `<div class="row" style="gap:8px"><img src="${pv}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:10px"><button class="btn text" data-a="advPhotoX">شيل الصورة</button></div>` : ""}
-    <div class="row" style="flex-wrap:nowrap;align-items:flex-end;gap:8px"><label class="iconbtn lcam" style="position:relative;overflow:hidden" aria-label="ابعت صورة">${ic("cam")}<input type="file" accept="image/*" data-slot="adv_photo" style="position:absolute;inset:0;opacity:0" ${locked ? "disabled" : ""}></label>
+   <div class="composer lcomp">${pics.length ? `<div class="lpics">${pics.map((p, n) => `<span class="lpic"><img src="${p.url}" alt="صورة ${n + 1}"><button data-a="advPhotoX" data-i="${n}" aria-label="شيل الصورة ${n + 1}">×</button></span>`).join("")}${pics.length < MAX_PICS ? `<span class="sub xs">${pics.length} من ${MAX_PICS}</span>` : ""}</div>` : ""}
+    <div class="row" style="flex-wrap:nowrap;align-items:flex-end;gap:8px"><label class="iconbtn lcam" style="position:relative;overflow:hidden" aria-label="ابعت صورة">${ic("cam")}<input type="file" accept="image/*" multiple data-advimgs="1" style="position:absolute;inset:0;opacity:0" ${locked ? "disabled" : ""}></label>
     <textarea data-scope="adv" data-b="msg" id="adv_msg" rows="1" placeholder="${locked ? "استنى لما يخلّص…" : `اكتب لـ${PERSONA.name}…`}" ${locked ? "disabled" : ""} class="linput">${esc(d.msg || "")}</textarea>
     ${S.busyKey === "chat" ? `<button class="lstop" data-a="advStop">وقّف</button>` : S.adv.waiting ? "" : `<button class="iconbtn lsend" data-a="advSend" aria-label="ابعت"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="transform:scaleX(-1)"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>`}</div></div>`;
 }
@@ -519,16 +519,17 @@ async function waitForReply() {
 }
 async function reloadChat() { try { S.chat = (await q(sb.from("chat_messages").select("*").order("id", { ascending: false }).limit(80))).reverse(); if (S.tab === "advisor") { render(); scrollChat(); } } catch {} }
 async function advSend(qtext) {
-  if (S.busyKey || S.adv.waiting) return; const d = S.adv.d; const text = String(qtext ?? d.msg ?? "").trim(); const blob = S.pending["adv_photo"];
-  if (!text && !blob) return;
+  if (S.busyKey || S.adv.waiting) return; const d = S.adv.d; const text = String(qtext ?? d.msg ?? "").trim(); const pics = qtext != null ? [] : (S.advImgs || []);
+  if (!text && !pics.length) return;
   S.busyKey = "chat"; S.lastErr.chat = null; S.adv.steps = []; S.adv.started = Date.now(); S.adv.live = "";
-  let image_path = null;
-  try { if (blob) image_path = await upload(blob, "chat"); } catch (e) { S.busyKey = null; toast("الصورة ماترفعتش: " + e.message); render(); return; }
-  S.chat.push({ role: "user", content: text, image_path, id: "tmp", created_at: new Date().toISOString() }); d.msg = ""; delete S.pending["adv_photo"]; delete S.prev["adv_photo"];
+  let image_paths = [];
+  try { image_paths = await Promise.all(pics.map((p) => upload(p.blob, "chat"))); } catch (e) { S.busyKey = null; toast("الصور ماترفعتش: " + e.message); render(); return; }
+  const image_path = image_paths[0] || null;
+  S.chat.push({ role: "user", content: text, image_path, image_paths, id: "tmp", created_at: new Date().toISOString() }); d.msg = ""; if (pics.length) S.advImgs = [];
   render(); scrollChat(); startAdvTimer();
   S.adv.ctl = new AbortController();
   try {
-    const r = await aiStream("chat", { text, image_path }, (ev) => {
+    const r = await aiStream("chat", { text, image_path, image_paths }, (ev) => {
       if (S.adv.steps.at(-1)?.label === ev.label && !ev.detail) return;
       S.adv.steps.push(ev); const box = $(".lthink"); if (box && !S.adv.live) { box.outerHTML = thinkingCard(); scrollChat(); }
       const st = $("#advStatus"); if (st) st.textContent = ev.label + "…";
@@ -550,6 +551,7 @@ async function advSend(qtext) {
   } finally { S.busyKey = null; S.adv.ctl = null; S.adv.live = ""; clearInterval(advTimerId); render(); scrollChat(); }
 }
 let liveRaf = 0;
+const MAX_PICS = 4;
 function scrollChat() { if (S.tab === "advisor") requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
 
 /* ---- Lorenzo's file (atelier sheet): plan, evaluation, what he knows, lessons, fashion notes ---- */
@@ -867,6 +869,12 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", async (e) => {
   const t = e.target;
+  if (t.matches("input[type=file][data-advimgs]")) {
+    const files = [...(t.files || [])]; t.value = ""; S.advImgs ||= [];
+    const room = MAX_PICS - S.advImgs.length; if (files.length > room) toast(`بحد أقصى ${MAX_PICS} صور في الرسالة`);
+    for (const f of files.slice(0, Math.max(0, room))) { try { const b = await shrink(f); S.advImgs.push({ blob: b, url: URL.createObjectURL(b) }); } catch { toast("صورة منهم مش بتفتح"); } }
+    render(); scrollChat(); return;
+  }
   if (t.matches("input[type=file][data-magic]")) { const f = t.files?.[0]; if (f) magicAdd(f); return; }
   if (!t.matches("input[type=file][data-slot]")) return;
   const f = t.files?.[0]; if (!f) return; const key = t.dataset.slot;
@@ -935,7 +943,7 @@ document.addEventListener("click", async (e) => {
     case "weekCloseEarly": S.adv.early = true; render(); break;
     case "advAsk": advSend(a.dataset.q); break;
     case "advSend": advSend(); break;
-    case "advPhotoX": delete S.pending["adv_photo"]; delete S.prev["adv_photo"]; render(); break;
+    case "advPhotoX": { const n = +a.dataset.i; const p = (S.advImgs || [])[n]; if (p) URL.revokeObjectURL(p.url); (S.advImgs || []).splice(n, 1); render(); break; }
     case "add": openSheet({ type: "add", step: "cat", d: { occasions: [], season: "كل المواسم" } }); break;
     case "addPerf": openSheet({ type: "add", step: "details", d: { category: "perfume", pstatus: "owned", ptype: "أصلي", role: "occasion", occasions: [], season: "كل المواسم" } }); break;
     case "toCat": s.step = "cat"; renderSheet(); break;

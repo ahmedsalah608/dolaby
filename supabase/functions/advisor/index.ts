@@ -434,24 +434,27 @@ async function updateSummary(ctx: Ctx, oldestShownId: number, prev: string, upto
 
 async function modeChat(ctx: Ctx, body: any) {
   const text = String(body.text || "").trim().slice(0, 4000);
-  const imagePath = body.image_path ? String(body.image_path) : null;
+  // up to 4 photos per message (older app versions send only image_path)
+  const imagePaths: string[] = [...new Set<string>((Array.isArray(body.image_paths) && body.image_paths.length ? body.image_paths : body.image_path ? [body.image_path] : []).map((x: unknown) => String(x)))].slice(0, 4);
+  const imagePath = imagePaths[0] || null;
   if (!text && !imagePath) throw new AppError("empty", "اكتب رسالة أو ابعت صورة.");
   ctx.emit?.({ kind: "read", label: "بيبص على دولابك وملفك" });
   const [all, ex] = await Promise.all([loadAll(ctx), chatExtras(ctx)]);
-  const { data: hist } = await ctx.db.from("chat_messages").select("id,role,content,image_path,created_at").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(HISTORY);
+  const { data: hist } = await ctx.db.from("chat_messages").select("id,role,content,image_path,image_paths,created_at").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(HISTORY);
   // one reply at a time: if the last message is still waiting for its reply, don't start a second one
   const lastMsg = (hist || [])[0];
   if (lastMsg?.role === "user" && Date.now() - Date.parse(lastMsg.created_at) < 100_000) throw new AppError("busy", "لسه بيرد على رسالتك اللي فاتت. استنى ثواني وهيظهر الرد.", 409);
-  await ctx.db.from("chat_messages").insert({ owner_id: ctx.uid, role: "user", content: text, image_path: imagePath });
+  await ctx.db.from("chat_messages").insert({ owner_id: ctx.uid, role: "user", content: text, image_path: imagePath, image_paths: imagePaths.length ? imagePaths : null });
   const past = (hist || []).reverse();
-  // the last 3 photos go back in as real images, so he never "forgets" what he saw
-  const recentImgs = new Set(past.filter((m: any) => m.image_path).slice(-3).map((m: any) => m.image_path));
+  // the last 4 photos go back in as real images, so he never "forgets" what he saw
+  const picsOf = (m: any): string[] => (m.image_paths && m.image_paths.length ? m.image_paths : m.image_path ? [m.image_path] : []);
+  const recentImgs = new Set(past.flatMap(picsOf).slice(-Math.max(0, 4 - imagePaths.length)));
   const clean = (t: string) => String(t || "").replace(/\[\[ردود:[^\]]*\]\]/g, "").replace(/```card\s*([\s\S]*?)```/g, (_m, j) => { try { return "(كارت: " + JSON.parse(j).title + ")"; } catch { return ""; } }).trim();
   const messages: any[] = [];
   for (const m of past) {
     const blocks: any[] = [];
-    if (m.role === "user" && m.image_path) {
-      if (recentImgs.has(m.image_path)) { try { blocks.push(await imageBlock(ctx, m.image_path)); } catch { blocks.push({ type: "text", text: "(صورة مابقتش موجودة)" }); } }
+    if (m.role === "user") for (const pth of picsOf(m)) {
+      if (recentImgs.has(pth)) { try { blocks.push(await imageBlock(ctx, pth)); } catch { blocks.push({ type: "text", text: "(صورة مابقتش موجودة)" }); } }
       else blocks.push({ type: "text", text: "(صورة قديمة شفتها قبل كده)" });
     }
     const t = m.role === "assistant" ? clean(m.content) : String(m.content || "");
@@ -462,8 +465,8 @@ async function modeChat(ctx: Ctx, body: any) {
   }
   if (messages[0]?.role === "assistant") messages.shift();
   const cur: any[] = [];
-  if (imagePath) cur.push(await imageBlock(ctx, imagePath));
-  cur.push({ type: "text", text: text || "(بعتلك صورة)" });
+  for (const pth of imagePaths) cur.push(await imageBlock(ctx, pth));
+  cur.push({ type: "text", text: text || (imagePaths.length > 1 ? `(بعتلك ${imagePaths.length} صور)` : "(بعتلك صورة)") });
   const lastM = messages[messages.length - 1];
   if (lastM?.role === "user") lastM.content.push(...cur); else messages.push({ role: "user", content: cur });
   if ((hist || []).length >= HISTORY) { const oldest = Number(hist![hist!.length - 1].id); if (oldest - ex.summaryUpto > 12) ctx.after.push(() => updateSummary(ctx, oldest, ex.summary, ex.summaryUpto)); }
