@@ -55,7 +55,7 @@ const S = {
   authMode: "in", authD: {}, profile: null, meas: [], items: [], advisor: null, lessons: [], chat: [], settings: null,
   state: {}, usage: [], keyStatus: null, tab: "closet", shelf: "clothes", sheet: null, pending: {}, prev: {},
   busy: null, busyKey: null, ob: { step: 0, d: {} }, gate: { d: null },
-  adv: { seg: "chat", d: {}, early: false }, reco: { seg: "today", d: { occasion: "شغل من البيت", weather: defaultWeather() }, shopAsk: "" },
+  adv: { d: {}, early: false, steps: [], started: 0, ctl: null }, notes: [], reco: { seg: "today", d: { occasion: "شغل من البيت", weather: defaultWeather() }, shopAsk: "" },
   urls: new Map(), lastErr: {},
 };
 const uid = () => S.session?.user?.id;
@@ -106,7 +106,7 @@ async function loadAll() {
       prof = await q(sb.from("profiles").select("*").maybeSingle());
       if (mig?.items) toast(`نقلت بياناتك من دولابي القديم: ${mig.items} قطعة و${mig.measurements} قياس`);
     }
-    const [meas, items, adv, les, chat, st, state, usage, ks] = await Promise.all([
+    const [meas, items, adv, les, chat, st, state, usage, ks, notes] = await Promise.all([
       q(sb.from("measurements").select("*").order("taken_at", { ascending: false }).limit(36)),
       q(sb.from("items").select("*").order("created_at", { ascending: false })),
       q(sb.from("advisor").select("*").maybeSingle()),
@@ -116,11 +116,12 @@ async function loadAll() {
       q(sb.from("app_state").select("key,value,updated_at")),
       q(sb.from("usage_log").select("*").gte("created_at", monthStartISO()).order("id", { ascending: false }).limit(300)),
       sb.rpc("anthropic_key_status"),
+      q(sb.from("style_notes").select("*").order("id", { ascending: false }).limit(30)),
     ]);
     S.profile = normProfile(prof); S.meas = meas.map(normMeas); S.items = items.map(normItem);
     S.advisor = adv || { about: {}, goals: [], history: [] }; S.lessons = les; S.chat = chat.reverse();
     S.settings = st || { monthly_cap_usd: 5 }; S.state = Object.fromEntries(state.map((r) => [r.key, r.value]));
-    S.usage = usage; S.keyStatus = ks.data || { set: false };
+    S.usage = usage; S.keyStatus = ks.data || { set: false }; S.notes = notes;
     S.loaded = true;
     sb.from("profiles").update({ last_open_at: new Date().toISOString() }).eq("owner_id", uid()).then(() => {}, () => {});
     if (S.state.migration?.photos === "pending") importPhotos();
@@ -136,6 +137,8 @@ async function reloadPart(part) {
     if (part === "profile") S.profile = normProfile(await q(sb.from("profiles").select("*").maybeSingle()));
     if (part === "meas") S.meas = (await q(sb.from("measurements").select("*").order("taken_at", { ascending: false }).limit(36))).map(normMeas);
     if (part === "usage") S.usage = await q(sb.from("usage_log").select("*").gte("created_at", monthStartISO()).order("id", { ascending: false }).limit(300));
+    if (part === "notes") S.notes = await q(sb.from("style_notes").select("*").order("id", { ascending: false }).limit(30));
+    if (part === "settings") S.settings = (await q(sb.from("settings").select("*").maybeSingle())) || S.settings;
     if (part === "state") S.state = Object.fromEntries((await q(sb.from("app_state").select("key,value"))).map((r) => [r.key, r.value]));
   } catch (e) { console.warn(part, e); }
 }
@@ -183,10 +186,10 @@ async function ai(mode, payload = {}) {
   return data;
 }
 async function aiJob(key, mode, payload, after) {
-  if (S.busyKey) return; S.busyKey = key; S.lastErr[key] = null; render();
+  if (S.busyKey) return; S.busyKey = key; S.lastErr[key] = null; render(); if (S.sheet) renderSheet();
   try { const r = await ai(mode, payload); await after?.(r); toast(`${modelName(r.model)} · ${usd(r.cost_usd)}`); }
   catch (e) { S.lastErr[key] = e.message; if (e.code === "no_key") toast("حط مفتاح Anthropic من ملفي ← الإعدادات"); }
-  finally { S.busyKey = null; render(); }
+  finally { S.busyKey = null; render(); if (S.sheet) renderSheet(); }
 }
 const errBox = (k) => S.lastErr[k] ? `<div class="err">${esc(S.lastErr[k])}</div>` : "";
 const busyBox = (t) => `<div class="box" style="align-items:center;text-align:center;padding:24px"><span class="spin" style="width:28px;height:28px"></span><strong>${t}</strong><p class="sub sm">ده بياخد من نص دقيقة لدقيقتين.</p></div>`;
@@ -211,6 +214,7 @@ function render(force) {
     : m === "auth" ? vAuth() : m === "recovery" ? vRecovery() : m === "error" ? vError()
     : m === "onboard" ? vOnboard() : m === "gate" ? vGate()
     : ({ closet: vCloset, reco: vReco, advisor: vAdvisor, profile: vProfile })[S.tab]();
+  document.body.dataset.screen = m === "tab" ? S.tab : m;
   const nav = $("#nav"); nav.hidden = m !== "tab";
   if (m === "tab") nav.innerHTML = [["closet", "الدولاب", "hanger"], ["reco", "الترشيحات", "chart"], ["add", "", "plus"], ["advisor", "المستشار", "chat"], ["profile", "ملفي", "user"]].map(([k, l, i]) => k === "add" ? `<button class="plus" data-a="add" aria-label="ضيف قطعة">${ic(i)}</button>` : `<button data-tab="${k}" aria-current="${S.tab === k}">${ic(i)}${l}</button>`).join("");
   hydrateImgs();
@@ -316,13 +320,13 @@ function vCloset() {
   </div>`;
 }
 function card(i) {
-  const ph = i.photos?.wornFront || i.photos?.flatFront || Object.values(i.photos || {})[0];
+  const ph = photoOf(i);
   const tag = i.analysis?.verdict ? pill(VERD[i.analysis.verdict] || ["محلّلة", "p-none"]) : pill(["لسه", "p-none"]);
   return `<button class="piece" data-open="${esc(i.id)}"><div class="ph">${ph ? img(ph, "", 'loading="lazy"') : ic((CATS[i.category] || CATS.top)[1])}<span class="tag">${tag}</span></div><div class="nm"><strong>${esc(i.name || "بدون اسم")}</strong><span>${esc((CATS[i.category] || [""])[0]) + (i.color ? " · " + esc(i.color) : "")}</span></div></button>`;
 }
 function mono(i, big) { const s = i.season === "صيفي" ? "m-sum" : i.season === "شتوي" ? "m-win" : "m-all"; const t = String(i.name || "").replace(/\(.*?\)/g, "").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join(""); return `<span class="mono ${s} ${big ? "big" : ""}">${esc(t)}</span>`; }
 function prow(i) { const ph = i.photos?.bottle; return `<button class="prow" data-open="${esc(i.id)}"><span class="pthumb">${ph ? img(ph, "", 'loading="lazy"') : mono(i)}</span><span class="pinfo"><strong>${esc(i.name || "بدون اسم")}</strong><small>${esc([i.role === "daily" ? "يومي" : "", i.house, i.ml ? i.ml + " مل" : "", i.season].filter(Boolean).join(" · "))}</small>${i.pstatus === "planned" && i.when ? `<small>${esc(i.when)}</small>` : ""}</span>${pill(PST[i.pstatus] || PST.owned)}</button>`; }
-function thumbOf(i) { const ph = i.category === "perfume" ? i.photos?.bottle : (i.photos?.flatFront || i.photos?.wornFront || Object.values(i.photos || {})[0]); return `<span class="pthumb">${ph ? img(ph) : i.category === "perfume" ? mono(i) : `<span class="mono m-all">${ic((CATS[i.category] || CATS.top)[1])}</span>`}</span>`; }
+function thumbOf(i) { const ph = photoOf(i); return `<span class="pthumb">${ph ? img(ph) : i.category === "perfume" ? mono(i) : `<span class="mono m-all">${ic((CATS[i.category] || CATS.top)[1])}</span>`}</span>`; }
 
 /* ---------- recommendations (no wallet, no budget) ---------- */
 function vReco() {
@@ -391,95 +395,230 @@ function rShop() {
   ${mk?.stores ? `<div class="col"><h3>أماكن الشرا</h3><div class="list">${mk.stores.map((s) => `<div class="li" style="cursor:default;align-items:flex-start"><div><div class="row between"><strong>${esc(s.name)}</strong>${pill([s.tier, "p-mute"])}</div><small>${esc(s.goodFor)}</small><small>${esc(s.prices)}</small><small>${esc(s.where)}</small>${s.link ? `<a class="xs" href="${esc(s.link)}" target="_blank" rel="noopener">افتح الموقع</a>` : ""}</div></div>`).join("")}</div><p class="sub xs">اتجمعت ببحث ${esc(mk.checked || "")}، فممكن تكون قديمة.</p></div>` : ""}`;
 }
 
-/* ---------- advisor ---------- */
+/* ---------- advisor: Lorenzo ---------- */
+const PERSONA = { name: "لورينزو", role: "خيّاطك ومستشارك" };
 const AREAS = { clothes: "الهدوم والمقاس", body: "الجسم والوقفة", grooming: "الشعر والدقن والحلاقة", skin: "العناية الشخصية", glasses: "النضارة", speech: "الكلام ولغة الجسد", etiquette: "الإتيكيت والشخصية" };
+const TIE = (size = 26, sw = 1.6) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" style="fill:none;stroke:var(--gold);stroke-width:${sw};stroke-linecap:round;stroke-linejoin:round"><path d="M12 12 4 8v8zM12 12l8-4v8zM10.5 12a1.5 1.5 0 1 0 3 0 1.5 1.5 0 1 0-3 0"/></svg>`;
 function md(t) {
-  return esc(t).replace(/\[\[يوتيوب:\s*([^\]]+)\]\]/g, (m, s) => `<a href="${YT(s.trim())}" target="_blank" rel="noopener">▶ ${s.trim()}</a>`)
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, a, u) => `<a href="${u}" target="_blank" rel="noopener">${a}</a>`)
+  return esc(t).replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, a, u) => `<a href="${u}" target="_blank" rel="noopener">${a}</a>`)
     .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (m, p, u) => `${p}<a href="${u}" target="_blank" rel="noopener">${u.length > 40 ? u.slice(0, 40) + "…" : u}</a>`)
+    .replace(/\[\[يوتيوب:\s*([^\]]+)\]\]/g, (m, s) => `<a href="${YT(s.trim())}" target="_blank" rel="noopener">▶ ${s.trim()}</a>`)
     .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\n/g, "<br>");
 }
+// reply format from the server: short messages split by ---, ```card {json}```, [[يوتيوب: ...]], [[ردود: a | b]]
+function parseReply(t) {
+  let chips = []; const videos = []; const parts = [];
+  t = String(t || "").replace(/\[\[ردود:\s*([^\]]+)\]\]/g, (m, s) => { chips = s.split("|").map((x) => x.trim()).filter(Boolean).slice(0, 3); return ""; })
+    .replace(/\[\[يوتيوب:\s*([^\]]+)\]\]/g, (m, q) => { videos.push(q.trim()); return ""; });
+  const pushText = (x) => x.split(/^\s*-{3,}\s*$/m).map((s) => s.trim()).filter(Boolean).forEach((s) => parts.push({ text: s }));
+  const re = /```card\s*([\s\S]*?)```/g; let last = 0, m;
+  while ((m = re.exec(t))) { pushText(t.slice(last, m.index)); try { parts.push({ card: JSON.parse(m[1].trim()) }); } catch { pushText(m[1]); } last = re.lastIndex; }
+  pushText(t.slice(last));
+  return { parts, chips, videos };
+}
+function photoOf(i) { if (!i) return null; return i.category === "perfume" ? (i.photos?.bottle || i.photos?.studio) : (i.photos?.studio || i.photos?.wornFront || i.photos?.flatFront || Object.values(i.photos || {})[0]); }
+function cardHtml(c) {
+  const rows = (Array.isArray(c.rows) ? c.rows : []).slice(0, 6).map((r) => { const it = r.item_id ? item(String(r.item_id)) : null; const ph = photoOf(it);
+    return `<${it ? `button class="crow" data-open="${esc(it.id)}"` : `div class="crow"`}><span class="cthumb">${ph ? img(ph) : it ? (it.category === "perfume" ? mono(it) : ic((CATS[it.category] || CATS.top)[1])) : ""}</span><span class="ctext"><strong>${esc(r.title || it?.name || "")}</strong>${r.sub ? `<span>${esc(r.sub)}</span>` : ""}</span></${it ? "button" : "div"}>`; }).join("");
+  return `<div class="lcard"><div class="lcard-h"><span>${esc(c.title || "")}</span>${c.tag ? `<span class="lcard-tag">${esc(c.tag)}</span>` : ""}</div>${rows}${c.footer || c.action ? `<div class="lcard-f"><span>${md(c.footer || "")}</span>${c.action ? `<button class="lcard-a" data-a="advAsk" data-q="${esc(c.action)}">${esc(c.action)} ←</button>` : ""}</div>` : ""}</div>`;
+}
+const videoHtml = (q) => `<a class="lvideo" href="${YT(q)}" target="_blank" rel="noopener"><span class="lvideo-i"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" style="fill:var(--gold)"><path d="M7 4l13 8-13 8z"/></svg></span><span><strong>اتعلم: ${esc(q)}</strong><small>بحث على يوتيوب</small></span></a>`;
+
 function vAdvisor() {
-  const a = S.advisor || {}; const seg = S.adv.seg;
-  return `<div class="col lg"><h1>المستشار</h1>
-   <div class="seg" role="group">${[["chat", "الشات"], ["plan", "خطتي"], ["eval", "التقييم"], ["about", "عني"]].map(([k, l]) => `<button data-aseg="${k}" aria-pressed="${seg === k}">${l}</button>`).join("")}</div>
-   ${!S.keyStatus?.set ? `<div class="tip">لسه ماحطيتش مفتاح Anthropic. <button class="btn text" style="min-height:30px;padding:0" data-a="sheetSettings">روح للإعدادات</button></div>` : ""}
-   ${seg === "chat" ? aChat() : seg === "plan" ? aPlan() : seg === "eval" ? aEval() : aAbout()}</div>`;
+  return `<div class="adv">
+    <header class="adv-h"><button class="adv-who" data-a="atelier" aria-label="افتح ملف ${PERSONA.name}"><span class="adv-av">${TIE()}</span><span><strong>${PERSONA.name}</strong><small id="advStatus">${S.busyKey === "chat" ? esc(S.adv.steps.at(-1)?.label || "بيفكر…") + "…" : PERSONA.role + " · متاح"}</small></span></button><button class="adv-plan" data-a="atelier">خطتي</button></header>
+    ${!S.keyStatus?.set ? `<div class="tip">لسه ماحطيتش مفتاح Anthropic. <button class="btn text" style="min-height:30px;padding:0" data-a="sheetSettings">روح للإعدادات</button></div>` : ""}
+    ${aChat()}</div>`;
 }
 function aChat() {
-  const turns = S.chat; const d = S.adv.d;
-  const empty = !turns.length ? `<div class="box" style="background:var(--gold-soft)"><strong>نبدأ بتقييم واضح</strong><p class="sm">ابدأ من "التقييم" عشان يقيّمك ويحطلك أهداف، أو اسأله في أي حاجة. تقدر تبعتله صورة كمان.</p><div class="choices">${["قيّمني وحطلي أهداف", "ساعدني أنضف نضارتي صح، هي متخدشة", "إزاي أقف وأمشي بثقة؟", "أبدأ بإيه في العناية بنفسي؟"].map((x) => `<button class="choice" data-a="advAsk" data-q="${esc(x)}">${esc(x)}</button>`).join("")}</div></div>` : "";
-  const bubbles = turns.slice(-40).map((t) => {
-    const meta = t.role === "assistant" && (t.model || t.cost_usd != null) ? `<div class="meta" style="align-self:flex-start">${t.model ? `<span>${esc(modelName(t.model))}</span>` : ""}${t.cost_usd != null ? `<span>${usd(t.cost_usd)}</span>` : ""}${t.meta?.searched ? pill(["بحث على النت", "p-keep"]) : ""}${(t.meta?.actions || []).length ? `<span>عمل: ${esc(t.meta.actions.join("، "))}</span>` : ""}</div>` : "";
-    const srcs = (t.meta?.sources || []).length ? `<details class="more" style="padding:0 10px"><summary class="xs">المصادر (${t.meta.sources.length})</summary><div class="srcs">${t.meta.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("")}</div></details>` : "";
-    return `<div class="bub ${t.role === "user" ? "me" : "him"}">${t.image_path ? img(t.image_path) : ""}${t.content ? `<div>${t.role === "user" ? esc(t.content).replace(/\n/g, "<br>") : md(t.content)}</div>` : ""}${srcs}</div>${meta}`;
+  const turns = S.chat; const d = S.adv.d; const lastA = [...turns].reverse().find((t) => t.role === "assistant");
+  const empty = !turns.length ? `<div class="lbub him">أهلاً يا أحمد. أنا ${PERSONA.name}، خيّاطك ومستشارك. نبدأ بإيه؟</div>
+    <div class="chips">${["قيّمني وحطلي أهداف", "ساعدني أنضف نضارتي، هي متخدشة", "ألبس إيه بكرة؟", "إزاي أقف وأمشي بثقة؟"].map((x) => `<button class="chip" data-a="advAsk" data-q="${esc(x)}">${esc(x)}</button>`).join("")}</div>` : "";
+  let lastDay = "";
+  const out = turns.slice(-40).map((t) => {
+    const day = t.created_at ? cairoDay(Date.parse(t.created_at)) : cairoDay(); let sep = "";
+    if (day !== lastDay) { lastDay = day; sep = `<span class="dsep">${day === cairoDay() ? "النهارده" : fmtD(Date.parse(day + "T12:00:00Z"))}</span>`; }
+    if (t.role === "user") return `${sep}<div class="lbub me">${t.image_path ? img(t.image_path) : ""}${t.content ? `<div>${esc(t.content).replace(/\n/g, "<br>")}</div>` : ""}</div>`;
+    const r = parseReply(t.content);
+    const body = r.parts.map((p) => p.card ? cardHtml(p.card) : `<div class="lbub him">${md(p.text)}</div>`).join("") + r.videos.map(videoHtml).join("");
+    const srcs = (t.meta?.sources || []).length ? `<details class="lsrc"><summary>المصادر (${t.meta.sources.length})</summary>${t.meta.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("")}</details>` : "";
+    const meta = `<span class="lmeta">${t.model ? esc(modelName(t.model)) : ""}${t.cost_usd != null ? ` · ‎${usd(t.cost_usd)}` : ""} · ${t.meta?.searched ? "من بحث على النت" : "من غير بحث"}</span>`;
+    const chips = t === lastA && r.chips.length && S.busyKey !== "chat" ? `<div class="chips">${r.chips.map((x) => `<button class="chip" data-a="advAsk" data-q="${esc(x)}">${esc(x)}</button>`).join("")}</div>` : "";
+    return sep + body + srcs + meta + chips;
   }).join("");
+  const busy = S.busyKey === "chat" ? thinkingCard() : "";
   const pv = S.prev["adv_photo"];
-  return `<div class="chat">${empty}${bubbles}${S.busyKey === "chat" ? `<div class="bub him"><span><span class="spin"></span> بيفكر… (ممكن ياخد دقيقة لو بيدوّر على النت)</span></div>` : ""}${errBox("chat")}</div>
-   <div class="composer">${pv ? `<div class="row" style="gap:8px"><img src="${pv}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:10px"><button class="btn text" data-a="advPhotoX">شيل الصورة</button></div>` : ""}
-    <div class="row" style="flex-wrap:nowrap;align-items:flex-end"><label class="iconbtn" style="position:relative;overflow:hidden" aria-label="صورة">${ic("cam")}<input type="file" accept="image/*" data-slot="adv_photo" style="position:absolute;inset:0;opacity:0"></label>
-    <textarea data-scope="adv" data-b="msg" id="adv_msg" rows="1" placeholder="اكتب للمستشار…" style="flex:1;min-width:0;border:1.5px solid var(--line);background:var(--card);border-radius:20px;padding:10px 14px;min-height:44px;max-height:140px;font-size:16px;resize:none">${esc(d.msg || "")}</textarea>
-    <button class="iconbtn" style="background:var(--brand);color:var(--on-brand)" data-a="advSend" aria-label="ابعت" ${S.busyKey === "chat" ? "disabled" : ""}><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="transform:scaleX(-1)"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button></div></div>`;
+  return `<div class="lchat" id="lchat">${empty}${out}${busy}${errBox("chat")}</div>
+   <div class="composer lcomp">${pv ? `<div class="row" style="gap:8px"><img src="${pv}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:10px"><button class="btn text" data-a="advPhotoX">شيل الصورة</button></div>` : ""}
+    <div class="row" style="flex-wrap:nowrap;align-items:flex-end;gap:8px"><label class="iconbtn lcam" style="position:relative;overflow:hidden" aria-label="ابعت صورة">${ic("cam")}<input type="file" accept="image/*" data-slot="adv_photo" style="position:absolute;inset:0;opacity:0" ${S.busyKey === "chat" ? "disabled" : ""}></label>
+    <textarea data-scope="adv" data-b="msg" id="adv_msg" rows="1" placeholder="${S.busyKey === "chat" ? "استنى لما يخلّص…" : `اكتب لـ${PERSONA.name}…`}" ${S.busyKey === "chat" ? "disabled" : ""} class="linput">${esc(d.msg || "")}</textarea>
+    ${S.busyKey === "chat" ? `<button class="lstop" data-a="advStop">وقّف</button>` : `<button class="iconbtn lsend" data-a="advSend" aria-label="ابعت"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="transform:scaleX(-1)"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>`}</div></div>`;
 }
+function thinkingCard() {
+  const st = S.adv.steps; const secs = Math.round((Date.now() - S.adv.started) / 1000);
+  const rows = st.map((s, i) => { const cur = i === st.length - 1;
+    return `<div class="tstep ${cur ? "cur" : "done"}"><span class="tdot">${cur ? "" : `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" style="fill:none;stroke:#fff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>`}</span><span><span>${esc(s.label)}</span>${s.detail ? `<small>«${esc(s.detail)}»</small>` : ""}</span></div>`; }).join("");
+  return `<div class="lthink" role="status"><div class="tsteps">${rows || `<div class="tstep cur"><span class="tdot"></span><span>بيبدأ…</span></div>`}</div>
+   <div class="tbar"><i></i></div><small class="ttime"><span id="advTimer">بقالي ${secs} ثانية</span>${st.some((s) => s.kind === "search") ? " · البحث بياخد لحد دقيقة" : ""}</small></div>`;
+}
+let advTimerId = null;
+function startAdvTimer() { clearInterval(advTimerId); advTimerId = setInterval(() => { const el = $("#advTimer"); if (!el || S.busyKey !== "chat") { clearInterval(advTimerId); return; } el.textContent = `بقالي ${Math.round((Date.now() - S.adv.started) / 1000)} ثانية`; }, 1000); }
+
+async function aiStream(mode, payload, onStep, signal) {
+  const doFetch = window.DOLABY_STUB?.streamFetch || fetch;
+  const { data } = await sb.auth.getSession(); const token = data.session?.access_token;
+  const r = await doFetch(`${CFG.url}/functions/v1/advisor`, { method: "POST", signal, headers: { "Content-Type": "application/json", apikey: CFG.key, Authorization: `Bearer ${token}` }, body: JSON.stringify({ mode, stream: true, ...payload }) });
+  const fail = (j) => { const e = new Error(j?.message || "حصلت مشكلة"); e.code = j?.error; return e; };
+  if (!(r.headers.get("content-type") || "").includes("ndjson")) { const j = await r.json().catch(() => null); if (!j?.ok) throw fail(j); return j; }
+  const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = "", fin = null;
+  for (;;) {
+    const { value, done } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; let ev; try { ev = JSON.parse(line); } catch { continue; } if (ev.type === "step") onStep(ev); else fin = ev; }
+  }
+  if (!fin) throw fail({ message: "الاتصال اتقطع قبل ما الرد يوصل. هيتحفظ لما يخلص، افتح الشات بعد شوية." });
+  if (fin.type === "error") throw fail(fin);
+  return fin;
+}
+async function reloadChat() { try { S.chat = (await q(sb.from("chat_messages").select("*").order("id", { ascending: false }).limit(80))).reverse(); if (S.tab === "advisor") { render(); scrollChat(); } } catch {} }
 async function advSend(qtext) {
   if (S.busyKey) return; const d = S.adv.d; const text = String(qtext ?? d.msg ?? "").trim(); const blob = S.pending["adv_photo"];
   if (!text && !blob) return;
-  S.busyKey = "chat"; S.lastErr.chat = null;
+  S.busyKey = "chat"; S.lastErr.chat = null; S.adv.steps = []; S.adv.started = Date.now();
   let image_path = null;
-  try { if (blob) image_path = await upload(blob, "chat"); } catch (e) { S.busyKey = null; toast("الصورة ماترفعتش: " + e.message); return; }
-  S.chat.push({ role: "user", content: text, image_path, id: "tmp" }); d.msg = ""; delete S.pending["adv_photo"]; delete S.prev["adv_photo"];
-  render(); scrollChat();
+  try { if (blob) image_path = await upload(blob, "chat"); } catch (e) { S.busyKey = null; toast("الصورة ماترفعتش: " + e.message); render(); return; }
+  S.chat.push({ role: "user", content: text, image_path, id: "tmp", created_at: new Date().toISOString() }); d.msg = ""; delete S.pending["adv_photo"]; delete S.prev["adv_photo"];
+  render(); scrollChat(); startAdvTimer();
+  S.adv.ctl = new AbortController();
   try {
-    const r = await ai("chat", { text, image_path });
-    S.chat.push({ role: "assistant", content: r.reply, model: r.model, cost_usd: r.cost_usd, meta: { searched: r.searched, sources: r.sources, actions: r.actions, searchErrors: r.searchErrors } });
+    const r = await aiStream("chat", { text, image_path }, (ev) => {
+      if (S.adv.steps.at(-1)?.label === ev.label && !ev.detail) return;
+      S.adv.steps.push(ev); const box = $(".lthink"); if (box) { box.outerHTML = thinkingCard(); scrollChat(); }
+      const st = $("#advStatus"); if (st) st.textContent = ev.label + "…";
+    }, S.adv.ctl.signal);
+    S.chat.push({ role: "assistant", content: r.reply, model: r.model, cost_usd: r.cost_usd, created_at: new Date().toISOString(), meta: { searched: r.searched, sources: r.sources, actions: r.actions, searchErrors: r.searchErrors } });
+    reloadPart("usage");
     if ((r.actions || []).length) { reloadPart("items"); reloadPart("advisor"); reloadPart("lessons"); reloadPart("profile"); reloadPart("meas"); }
     const userN = S.chat.filter((m) => m.role === "user").length;
-    if (userN % 4 === 0) ai("learn").then((x) => { if (x.added?.length) { reloadPart("lessons"); toast("المستشار اتعلم " + x.added.length + " درس جديد"); } }).catch(() => {});
-  } catch (e) { S.lastErr.chat = e.message; }
-  finally { S.busyKey = null; render(); scrollChat(); }
+    if (userN % 4 === 0) ai("learn").then((x) => { if (x.added?.length) { reloadPart("lessons"); toast(`${PERSONA.name} اتعلم ${x.added.length} حاجة جديدة عنك`); } }).catch(() => {});
+  } catch (e) {
+    if (e.name === "AbortError") { toast("وقّفت المتابعة. لو الرد خلص هيظهر هنا."); setTimeout(reloadChat, 25000); setTimeout(reloadChat, 70000); }
+    else S.lastErr.chat = e.message;
+  } finally { S.busyKey = null; S.adv.ctl = null; clearInterval(advTimerId); render(); scrollChat(); }
 }
-function scrollChat() { if (S.tab === "advisor" && S.adv.seg === "chat") requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
+function scrollChat() { if (S.tab === "advisor") requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
+
+/* ---- Lorenzo's file (atelier sheet): plan, evaluation, what he knows, lessons, fashion notes ---- */
 function aEval() {
   const as = S.advisor?.assessment;
-  if (!as) return `${S.busyKey === "assess" ? busyBox("بيعمل تقييمك") : `<div class="box"><h3>نبدأ بتقييم واضح</h3><p class="sm">هيبص على صور جسمك ومقاساتك ودولابك، ويقيّم: ${Object.values(AREAS).join("، ")}. اللي مش هيقدر يحكم عليه هيقولك محتاج يعرف إيه. بعدين يحطلك أهداف.</p>${Object.keys(S.profile?.bodyPhotos || {}).length ? "" : `<p class="sub xs">التقييم هيبقى أدق لو ضفت صور جسمك من "ملفي".</p>`}<button class="btn main wide" data-a="assess">${ic("spark")}ابدأ التقييم</button>${errBox("assess")}</div>`}`;
+  if (!as) return `${S.busyKey === "assess" ? busyBox("بيعمل تقييمك") : `<div class="box"><h3>نبدأ بتقييم واضح</h3><p class="sm">هيبص على صور جسمك ومقاساتك ودولابك، ويقيّم: ${Object.values(AREAS).join("، ")}. اللي مش هيقدر يحكم عليه هيقولك محتاج يعرف إيه. بعدين يحطلك أهداف.</p><button class="btn main wide" data-a="assess">${ic("spark")}ابدأ التقييم</button>${errBox("assess")}</div>`}`;
   return `<div class="box"><div class="row between"><h3>الصورة العامة</h3><span class="sub xs">${fmtD(as.at)}</span></div><p class="sm">${md(as.summary)}</p>${as.firstFocus ? `<div class="tip"><b>نبدأ بـ:</b> ${md(as.firstFocus)}</div>` : ""}</div>
   ${(as.areas || []).map((x) => `<div class="box"><div class="row between"><h3>${esc(x.name || AREAS[x.key] || x.key)}</h3>${x.score == null ? pill(["محتاج أعرف أكتر", "p-mute"]) : `<strong>${x.score}/10</strong>`}</div>${x.score == null ? "" : tapeBar(x.score / 10, "")}<p class="sm">${md(x.now)}</p>${x.why ? `<p class="sub sm">${md(x.why)}</p>` : ""}${(x.gaps || []).length ? `<p class="sub xs"><b>محتاج أعرف:</b> ${x.gaps.map(esc).join("، ")}</p>` : ""}</div>`).join("")}
   ${S.busyKey === "assess" ? busyBox("بيعمل تقييمك") : `<button class="btn wide" data-a="assess">${ic("spark")}قيّمني تاني</button>${errBox("assess")}<p class="sub xs">الأحسن تعيده كل شهر مع القياس الشهري.</p>`}`;
 }
-function aPlan() {
-  const a = S.advisor || {}, w = a.week; const days = w ? Math.floor((Date.now() - w.start) / DAY) : 0; const goals = a.goals || [];
-  if (!goals.length) return `<div class="box"><h3>لسه مفيش أهداف</h3><p class="sm">الأهداف بتطلع من التقييم الأول.</p><button class="btn main wide" data-a="toEval">روح للتقييم</button></div>`;
-  const weekCard = S.busyKey === "week" ? busyBox("بيجهزلك الأسبوع") : !w || w.done ? `<div class="box" style="background:var(--gold-soft)"><h3>${w ? "الأسبوع اللي جاي" : "أول أسبوع"}</h3><p class="sm">هدف واحد، ودرس صغير، وتحدي، وفيديوهات تتعلم منها.</p><button class="btn main wide" data-a="week">${ic("spark")}جهّز خطة الأسبوع</button>${errBox("week")}</div>`
-    : `<div class="box"><div class="row between"><h3>خطة الأسبوع</h3><span class="sub xs">يوم ${Math.min(7, days + 1)} من 7</span></div>${tapeBar(Math.min(1, (days + 1) / 7), "")}
-     <span class="pill p-gold" style="align-self:flex-start">${esc(w.goal)}</span><p class="sm">${md(w.lesson)}</p>
-     <div class="tip"><strong>التحدي</strong><p>${md(w.challenge)}</p></div>
+function weekCard() {
+  const w = S.advisor?.week; const days = w ? Math.floor((Date.now() - w.start) / DAY) : 0;
+  if (S.busyKey === "week") return busyBox("بيجهزلك الأسبوع");
+  if (!w || w.done) return `<div class="box" style="background:var(--gold-soft)"><h3>${w ? "الأسبوع اللي جاي" : "أول أسبوع"}</h3><p class="sm">هدف واحد، ودرس صغير، وتحدي، وفيديوهات تتعلم منها.</p><button class="btn main wide" data-a="week">${ic("spark")}جهّز خطة الأسبوع</button>${errBox("week")}</div>`;
+  return `<div class="box"><div class="row between"><h3>مهمة الأسبوع</h3><span class="pill p-gold">${esc(w.goal)}</span></div>${tapeBar(Math.min(1, (days + 1) / 7), `يوم ${Math.min(7, days + 1)} من 7`)}
+     <p class="sm">${md(w.lesson)}</p><div class="tip"><strong>التحدي</strong><p>${md(w.challenge)}</p></div>
      ${(w.checklist || []).map((c, i) => `<button class="li" style="padding-inline:0;min-height:48px" data-a="weekTick" data-i="${i}"><span class="pthumb" style="width:26px;height:26px;border-radius:8px;border:1.5px solid ${c.done ? "var(--gold)" : "var(--line)"};background:${c.done ? "var(--gold)" : "transparent"};color:#fff;display:grid;place-items:center">${c.done ? ic("check") : ""}</span><div><span class="sm" style="${c.done ? "text-decoration:line-through;color:var(--sub)" : ""}">${esc(c.t)}</span></div></button>`).join("")}
-     ${(w.videos || []).length ? `<div class="col" style="gap:6px"><strong class="sm">تتفرج على</strong>${w.videos.map((v) => `<a class="sm" href="${YT(v)}" target="_blank" rel="noopener">▶ ${esc(v)}</a>`).join("")}</div>` : ""}
-     ${w.tip ? `<p class="sub sm">${md(w.tip)}</p>` : ""}
+     ${(w.videos || []).map(videoHtml).join("")}
      ${days >= 6 || S.adv.early ? `<div class="col" style="gap:8px;border-top:1px solid var(--line);padding-top:12px"><strong>الأسبوع خلص. عملت التحدي؟</strong>${One("adv", S.adv.d, "result", ["عملته كله", "عملت جزء", "ماعملتوش"])}${F("adv", S.adv.d, "weekNote", "إيه اللي حصل؟", { area: 1, ph: "اللي نفع، واللي كان صعب" })}<button class="btn main" data-a="weekClose">قفّل الأسبوع</button></div>` : `<button class="btn text" style="align-self:flex-start" data-a="weekCloseEarly">خلّصت بدري؟ قفّل الأسبوع</button>`}</div>`;
-  const sug = a.assessment?.suggestedGoals || [];
-  return `${weekCard}
-   <div class="col"><h3>أهدافك</h3>${goals.map((g) => { const dn = (g.steps || []).filter((s) => s.done).length, n = (g.steps || []).length || 1; return `<div class="box"><div class="row between"><strong>${esc(g.title)}</strong>${pill(g.status === "done" ? ["خلص", "p-keep"] : g.status === "paused" ? ["متأجل", "p-mute"] : ["شغال", "p-gold"])}</div><span class="sub xs">${esc(g.area)}${g.why ? " · " + esc(g.why) : ""}</span>${tapeBar(dn / n, "")}
+}
+function aGoals() {
+  const goals = S.advisor?.goals || [];
+  if (!goals.length) return `<div class="box"><h3>لسه مفيش أهداف</h3><p class="sm">الأهداف بتطلع من التقييم الأول.</p><button class="btn main wide" data-a="atelierGo" data-v="eval">روح للتقييم</button></div>`;
+  const sug = S.advisor?.assessment?.suggestedGoals || [];
+  return `${goals.map((g) => { const dn = (g.steps || []).filter((s) => s.done).length, n = (g.steps || []).length || 1; return `<div class="box"><div class="row between"><strong>${esc(g.title)}</strong>${pill(g.status === "done" ? ["خلص", "p-keep"] : g.status === "paused" ? ["متأجل", "p-mute"] : ["شغال", "p-gold"])}</div><span class="sub xs">${esc(g.area)}${g.why ? " · " + esc(g.why) : ""}</span>${tapeBar(dn / n, "")}
      ${(g.steps || []).map((s, i) => `<button class="li" style="padding-inline:0;min-height:44px" data-a="stepTick" data-g="${esc(g.id)}" data-i="${i}"><span class="pthumb" style="width:24px;height:24px;border-radius:7px;border:1.5px solid ${s.done ? "var(--good)" : "var(--line)"};background:${s.done ? "var(--good)" : "transparent"};color:#fff;display:grid;place-items:center">${s.done ? ic("check") : ""}</span><div><span class="sm" style="${s.done ? "text-decoration:line-through;color:var(--sub)" : ""}">${esc(s.t)}</span></div></button>`).join("")}
      <div class="row"><button class="btn text" style="min-height:36px" data-a="goalStatus" data-g="${esc(g.id)}" data-s="${g.status === "paused" ? "active" : "paused"}">${g.status === "paused" ? "رجّعه" : "أجّله"}</button>${g.status !== "done" ? `<button class="btn text" style="min-height:36px" data-a="goalStatus" data-g="${esc(g.id)}" data-s="done">خلّصته</button>` : ""}</div></div>`; }).join("")}
-   ${sug.length ? `<div class="box"><h3>أهداف جديدة من آخر تقييم</h3>${sug.map((g, i) => `<div class="fix"><strong class="sm">${esc(g.title)}</strong><span class="sub xs">${esc(g.why || "")}</span><button class="btn text" style="justify-content:flex-start;padding:0;min-height:32px" data-a="goalAdopt" data-i="${i}">${ic("plus")}ضيفه</button></div>`).join("")}</div>` : ""}</div>`;
+   ${sug.length ? `<div class="box"><h3>أهداف جديدة من آخر تقييم</h3>${sug.map((g, i) => `<div class="fix"><strong class="sm">${esc(g.title)}</strong><span class="sub xs">${esc(g.why || "")}</span><button class="btn text" style="justify-content:flex-start;padding:0;min-height:32px" data-a="goalAdopt" data-i="${i}">${ic("plus")}ضيفه</button></div>`).join("")}</div>` : ""}`;
 }
 function aAbout() {
   const ab = S.advisor?.about || {}; const L = { style: "الستايل", job: "الشغل", events: "المناسبات", goals: "الأهداف", progress: "التقدم", body: "الجسم", grooming: "العناية والحلاقة", glasses: "النضارة", other: "حاجات تانية" };
   const keys = Object.keys(ab);
-  return `<div class="box"><h3>اللي المستشار يعرفه عنك</h3><p class="sub sm">بيتبني من كلامكم مع بعض. لو حاجة غلط، قوله في الشات يصلحها.</p>
-   ${keys.length ? keys.map((k) => `<div class="fix"><strong class="sm">${esc(L[k] || k)}</strong><p class="sm">${md(ab[k])}</p></div>`).join("") : `<p class="sub sm">لسه فاضي. هيتملا مع الوقت.</p>`}</div>
-   <div class="box"><div class="row between"><h3>الدروس اللي اتعلمها (${S.lessons.length})</h3><button class="btn text" style="min-height:32px" data-a="sheetSettings">عدّلها</button></div>${S.lessons.slice(0, 5).map((l) => `<p class="sm">• ${esc(l.rule)}</p>`).join("") || `<p class="sub sm">لسه مفيش.</p>`}</div>`;
+  return `<div class="box"><p class="sub sm">بيتبني من كلامكم مع بعض. لو حاجة غلط، قوله في الشات يصلحها.</p>
+   ${keys.length ? keys.map((k) => `<div class="fix"><strong class="sm">${esc(L[k] || k)}</strong><p class="sm">${md(ab[k])}</p></div>`).join("") : `<p class="sub sm">لسه فاضي. هيتملا مع الوقت.</p>`}</div>`;
+}
+function aLessons() {
+  return `<div class="box"><p class="sub sm">بتتحمّل في كل رد. امسح أي واحد غلط.</p>${S.lessons.map((l) => `<div class="lesson"><p>${esc(l.rule)}<br><span class="sub xs">${fmtD(l.created_at)}${l.source === "auto" ? " · اتعلمه لوحده" : l.source === "outfit" ? " · من رأيك في طقم" : ""}</span></p><button class="iconbtn" data-a="lessonDel" data-id="${l.id}" aria-label="امسح">${ic("trash")}</button></div>`).join("") || `<p class="sub sm">لسه مفيش.</p>`}</div>`;
+}
+function aNotes() {
+  const st = S.settings || {};
+  return `<div class="box"><p class="sm">كل يوم الساعة 7 الصبح بتوقيت مصر ${PERSONA.name} بيعمل بحث صغير عن الموضة الرجالي يناسبك، بحد أقصى ${usd(st.daily_learn_cap_usd ?? 0.1)} في اليوم. ${st.daily_learn === false ? "<b>متوقف دلوقتي.</b>" : ""}</p></div>
+   ${(S.notes || []).map((n) => `<div class="box"><div class="row between"><strong>${esc(n.topic)}</strong><span class="sub xs">${fmtD(Date.parse(n.day + "T12:00:00Z"))}</span></div><p class="sm">${md(n.insight)}</p>${(n.tips || []).length ? `<ul class="sm">${n.tips.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}${(n.sources || []).length ? `<details class="lsrc"><summary>المصادر (${n.sources.length})</summary>${n.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("")}</details>` : ""}<span class="sub xs">${n.searches || 0} بحث · ${usd(n.cost_usd)}</span></div>`).join("") || `<p class="sub sm">لسه ما اتعلمش حاجة. أول بحث هيكون بكرة الساعة 7 الصبح.</p>`}`;
+}
+function sheetAtelier(s) {
+  const v = s.view || "home"; const a = S.advisor || {}; const w = a.week;
+  const titles = { eval: "تقييمك", goals: "أهدافك", plan: "مهمة الأسبوع", about: "اللي يعرفه عنك", lessons: "الدروس اللي اتعلمها", notes: "بيتعلم إيه من الموضة" };
+  if (v !== "home") return sheetFrame(titles[v], `<div class="col lg">${v === "eval" ? aEval() : v === "goals" ? aGoals() : v === "plan" ? weekCard() : v === "about" ? aAbout() : v === "lessons" ? aLessons() : aNotes()}</div>`, "", "atelierHome");
+  const active = (a.goals || []).filter((g) => g.status === "active").length; const days = w && !w.done ? Math.min(7, Math.floor((Date.now() - w.start) / DAY) + 1) : null;
+  const n0 = (S.notes || [])[0], l0 = S.lessons[0];
+  return sheetFrame(PERSONA.name, `<div class="col lg">
+    <div class="atel"><span class="adv-av big">${TIE(40, 1.5)}</span><strong>${PERSONA.name}</strong><small>خيّاطك ومستشارك في المظهر والإتيكيت</small>
+     <div class="atel-stats"><span><b>${active}</b><small>أهداف شغالة</small></span><span><b>${S.lessons.length}</b><small>درس اتعلمه</small></span><span><b>${days ? "يوم " + days : "—"}</b><small>من الأسبوع</small></span></div></div>
+    ${w && !w.done ? `<button class="box atel-task" data-a="atelierGo" data-v="plan"><div class="row between"><strong>مهمة الأسبوع</strong><span class="pill p-gold">${esc(w.goal)}</span></div><p class="sm" style="text-align:start">${esc(w.challenge)}</p>${tapeBar((w.checklist || []).filter((c) => c.done).length / Math.max(1, (w.checklist || []).length), "")}</button>` : `<button class="btn main wide" data-a="atelierGo" data-v="plan">${ic("spark")}${a.goals?.length ? "جهّز مهمة الأسبوع" : "شوف خطة الأسبوع"}</button>`}
+    <div class="list">${[["eval", "تقييمك", a.assessment ? `${(a.assessment.areas || []).length} مجالات` : "لسه"], ["goals", "أهدافك", `${active} شغالة`], ["about", "اللي يعرفه عنك", `${Object.keys(a.about || {}).length} حاجات`], ["lessons", "الدروس اللي اتعلمها منك", String(S.lessons.length)], ["notes", "بيتعلم إيه من الموضة", (S.notes || []).length ? `آخر بحث ${fmtD(Date.parse(S.notes[0].day + "T12:00:00Z"))}` : "كل يوم 7 الصبح"]].map(([k, l, sub]) => `<button class="li" data-a="atelierGo" data-v="${k}"><div><strong>${l}</strong><small>${esc(sub)}</small></div><span class="chev">${ic("back")}</span></button>`).join("")}</div>
+    ${n0 ? `<div class="box"><strong>آخر حاجة اتعلمها من الموضة</strong><p class="sm">${esc(n0.topic)}: ${esc(n0.insight)}</p></div>` : ""}
+    ${l0 ? `<div class="box"><strong>آخر درس اتعلمه منك</strong><p class="sm">«${esc(l0.rule)}»</p><span class="sub xs">${fmtD(l0.created_at)}</span></div>` : ""}
+  </div>`);
 }
 async function advWrite(fn, msg) {
   const a = JSON.parse(JSON.stringify(S.advisor || {})); fn(a);
-  try { await q(sb.from("advisor").upsert({ owner_id: uid(), goals: a.goals || [], week: a.week || null, history: a.history || [], assessment: a.assessment || null, updated_at: new Date().toISOString() })); S.advisor = { ...S.advisor, ...a }; if (msg) toast(msg); render(); }
+  try { await q(sb.from("advisor").upsert({ owner_id: uid(), goals: a.goals || [], week: a.week || null, history: a.history || [], assessment: a.assessment || null, updated_at: new Date().toISOString() })); S.advisor = { ...S.advisor, ...a }; if (msg) toast(msg); if (S.sheet) renderSheet(); else render(); }
   catch (e) { toast("ماتحفظش: " + e.message); }
 }
 async function weekClose() {
   const d = S.adv.d; const w = S.advisor?.week; if (!w) return; const res = d.result || "عملت جزء"; const note = String(d.weekNote || "").trim(); const ticks = (w.checklist || []).filter((c) => c.done).length;
   await advWrite((x) => { x.week.done = true; x.history = (x.history || []).concat([{ kind: "week", start: w.start, end: Date.now(), goal: w.goal, challenge: w.challenge, result: res, ticks, of: (w.checklist || []).length, note }]).slice(-60); }, "الأسبوع اتقفل");
   act("week_closed", { goal: w.goal, result: res, ticks, note }); d.result = null; d.weekNote = ""; S.adv.early = false;
+}
+
+/* ---------- studio photos (background removed on the phone) ---------- */
+let studioMod = null;
+async function studio() { if (!studioMod) studioMod = await import("./studio.js"); return studioMod; }
+async function fetchPhotoBlob(path) { if (!S.urls.has(path)) { const { data } = await sb.storage.from("photos").createSignedUrls([path], 600); for (const r of data || []) if (r.signedUrl) S.urls.set(r.path, r.signedUrl); } const r = await fetch(S.urls.get(path)); if (!r.ok) throw new Error("مش قادر أفتح الصورة"); return await r.blob(); }
+const kindOf = (cat) => (cat === "perfume" || cat === "acc" ? "bottle" : "garment");
+// quick add: one photo → studio shot + details filled by Claude, then you confirm
+async function magicAdd(file) {
+  const s = { type: "add", step: "magic", d: { occasions: [], season: "كل المواسم" }, magic: { steps: [{ label: "بنجهّز الصورة" }], err: null } };
+  openSheet(s); const step = (label) => { s.magic.steps.push({ label }); if (S.sheet === s) renderSheet(); };
+  try {
+    const blob = await shrink(file, 1600); s.magic.prev = URL.createObjectURL(blob); renderSheet();
+    const orig = await upload(blob, "items");
+    step("بيشيل الخلفية على موبايلك (أول مرة بياخد وقت أطول)");
+    const st = await studio(); const cutP = st.cutout(blob, (k, p) => { s.magic.progress = p; });
+    step(`${PERSONA.name} بيتعرف على القطعة ويقرا التيكت`);
+    const idP = ai("identify", { image_path: orig }).catch((e) => ({ err: e }));
+    const [cut, idr] = await Promise.all([cutP, idP]);
+    const it = idr.err ? null : idr.item; if (idr.err) s.magic.idErr = idr.err.message;
+    const cat = it?.category || "top"; step("بيحطها على خلفية الاستوديو");
+    const shot = await st.compose(cut, kindOf(cat)); const studioPath = await upload(shot, "items");
+    s.photosPreset = cat === "perfume" ? { bottle: studioPath, bottleOriginal: orig } : { studio: studioPath, flatFront: orig };
+    s.d = { ...s.d, category: cat, name: it?.name || "", color: it?.color || "", season: it?.season || "كل المواسم", occasions: it?.occasions || [], notes: it?.notes || "",
+      ...(cat === "perfume" ? { house: it?.brand || "", ptype: ["أصلي", "تركيبة", "محلي"].includes(it?.ptype) ? it.ptype : "أصلي", ml: it?.ml || "", pstatus: "owned", role: "occasion" } : { brand: it?.brand || "" }) };
+    s.magic.result = { shot: URL.createObjectURL(shot), confidence: it?.confidence, read: it?.read_text, cost: idr.cost_usd, model: idr.model };
+    s.step = "details"; if (S.sheet === s) renderSheet();
+    act("studio_photo", { category: cat });
+  } catch (e) { s.magic.err = e.message || String(e); if (S.sheet === s) renderSheet(); }
+}
+function sheetMagic(s) {
+  const m = s.magic;
+  return sheetFrame("قطعة جديدة", `<div class="col lg">${m.prev ? `<img src="${m.prev}" alt="" style="width:100%;max-height:300px;object-fit:contain;border-radius:18px;background:var(--fill)">` : ""}
+   <div class="lthink" style="width:100%">${m.steps.map((x, i) => `<div class="tstep ${i === m.steps.length - 1 && !m.err ? "cur" : "done"}"><span class="tdot">${i === m.steps.length - 1 && !m.err ? "" : `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" style="fill:none;stroke:#fff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>`}</span><span>${esc(x.label)}</span></div>`).join("")}<div class="tbar"><i></i></div></div>
+   ${m.err ? `<div class="err">${esc(m.err)}</div><button class="btn wide" data-a="toCat">رجوع</button>` : ""}</div>`);
+}
+async function restudio(id) {
+  const it = item(id); if (!it || S.busy) return; S.busy = "studio:" + id; renderSheet();
+  try {
+    const src = it.category === "perfume" ? (it.photos.bottleOriginal || it.photos.bottle) : (it.photos.flatFront || it.photos.wornFront);
+    if (!src) throw new Error("ضيف صورة للقطعة الأول");
+    const st = await studio(); const shot = await st.studioShot(await fetchPhotoBlob(src), kindOf(it.category));
+    const path = await upload(shot, "items");
+    const photos = { ...it.photos, ...(it.category === "perfume" ? { bottle: path, bottleOriginal: it.photos.bottleOriginal || it.photos.bottle } : { studio: path }) };
+    await q(sb.from("items").update({ photos, updated_at: new Date().toISOString() }).eq("id", id)); await reloadPart("items"); act("studio_photo", { id }); toast("الصورة الشيك جاهزة");
+  } catch (e) { toast("ماقدرتش أعمل الصورة: " + (e.message || e)); }
+  finally { S.busy = null; if (S.sheet?.type === "item") renderSheet(); }
 }
 
 /* ---------- profile, settings, weekly review ---------- */
@@ -512,13 +651,16 @@ function sheetSettings(s) {
    <div class="box"><h3>حد الصرف الشهري</h3><p class="sm">السيرفر بيوقف أي طلب لو الصرف وصل للحد ده.</p>
     ${F("sh", d, "cap", "الحد", { num: 1, unit: "دولار" })}<button class="btn" data-a="capSave">احفظ الحد</button>
     <div class="kv"><span>صرفت الشهر ده</span><span>${usd(spent)}</span><span>الحد</span><span>${usd(cap)}</span><span>عدد الطلبات</span><span>${S.usage.length}</span></div>${tapeBar(cap ? spent / cap : 0, "")}</div>
+   <div class="box"><h3>تعلّم الموضة اليومي</h3><p class="sm">كل يوم الساعة 7 الصبح بتوقيت مصر، بحث صغير على النت بـHaiku. التكلفة بتتحسب من حد الشهر.</p>
+    <div class="field"><span>شغال؟</span>${Seg("sh", d, "dlearn", [["on", "أيوه"], ["off", "لأ"]])}</div>
+    ${F("sh", d, "dcap", "أقصى صرف في اليوم", { num: 1, unit: "دولار" })}<button class="btn" data-a="learnSave">احفظ</button></div>
    <div class="box"><h3>سجل الاستخدام</h3>${S.usage.length ? `<div class="table-wrap"><table><thead><tr><th>الوقت</th><th>النوع</th><th>الموديل</th><th>التكلفة</th></tr></thead><tbody>${S.usage.slice(0, 60).map((r) => `<tr><td>${fmtDT(r.created_at)}</td><td>${esc(KIND[r.kind] || r.kind)}${r.ok ? "" : " ⚠"}${r.searches ? ` · ${r.searches} بحث` : ""}</td><td>${esc(modelName(r.model))}</td><td>${usd(r.cost_usd)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="sub sm">لسه مفيش.</p>`}</div>
    <div class="box"><h3>دروس المستشار (${S.lessons.length})</h3><p class="sub sm">بتتحمّل في كل طلب. امسح الغلط.</p>
     ${S.lessons.map((l) => `<div class="lesson"><p>${esc(l.rule)}<br><span class="sub xs">${fmtD(l.created_at)}${l.source === "auto" ? " · اتعلمه لوحده" : l.source === "outfit" ? " · من رأيك في طقم" : ""}</span></p><button class="iconbtn" data-a="lessonDel" data-id="${l.id}" aria-label="امسح">${ic("trash")}</button></div>`).join("") || `<p class="sub sm">لسه مفيش.</p>`}</div>
    <div class="box"><h3>نسخة الدولاب القديم</h3><p class="sm">الأبلكيشن القديم على Claude لسه موجود زي ما هو كنسخة احتياطي.</p>${S.state.migration ? `<p class="sub xs">النقل: ${S.state.migration.items ?? "?"} قطعة، ${S.state.migration.measurements ?? "?"} قياس، الصور: ${S.state.migration.photos === "done" ? "اتنقلت" : "لسه"}</p>` : ""}</div>
   </div>`);
 }
-const KIND = { chat: "شات", verdict: "حكم قطعة", report: "تحليل الدولاب", shop: "ترشيحات شرا", outfit: "طقم النهارده", assess: "تقييم", week: "خطة أسبوع", review: "مراجعة أسبوع", learn: "تعلّم", ping: "تجربة المفتاح" };
+const KIND = { chat: "شات", verdict: "حكم قطعة", report: "تحليل الدولاب", shop: "ترشيحات شرا", outfit: "طقم النهارده", assess: "تقييم", week: "خطة أسبوع", review: "مراجعة أسبوع", learn: "تعلّم", ping: "تجربة المفتاح", identify: "التعرف على قطعة", daily_learn: "تعلّم الموضة اليومي" };
 function reviewWindow() {
   // the review is every Sunday 14:00 Cairo; the window is the 7 days before the latest one (or before now if it's later)
   const now = new Date(); const cairo = new Date(now.toLocaleString("en-US", { timeZone: TZ })); const offset = now - cairo;
@@ -540,7 +682,7 @@ async function openReview() {
     if (S.sheet?.type === "review") { S.sheet.data = { msgs, acts, les, use }; renderSheet(); }
   } catch (e) { toast("ماقدرتش أجيب الأسبوع: " + e.message); }
 }
-const ACT = { verdict: "حكم على قطعة", set_verdict: "حكم على قطعة", save_lesson: "حفظ درس", update_about: "حدّث ملخصك", update_profile: "حدّث ملفك", add_measurement: "سجّل قياس", update_item: "عدّل قطعة", set_goals: "حدّث الأهداف", assessment: "عمل تقييم", item_added: "ضفت قطعة", item_edited: "عدّلت قطعة", item_deleted: "مسحت قطعة", worn: "لبست قطعة", wore_outfit: "لبست طقم مترشح", outfit_feedback: "قيّمت طقم", measurement: "سجّلت قياس", step: "علّمت على خطوة", week_closed: "قفلت أسبوع", goal_status: "غيّرت حالة هدف", migrated: "نقل البيانات", onboarded: "عملت ملفك" };
+const ACT = { verdict: "حكم على قطعة", set_verdict: "حكم على قطعة", save_lesson: "حفظ درس", update_about: "حدّث ملخصك", update_profile: "حدّث ملفك", add_measurement: "سجّل قياس", update_item: "عدّل قطعة", set_goals: "حدّث الأهداف", assessment: "عمل تقييم", item_added: "ضفت قطعة", item_edited: "عدّلت قطعة", item_deleted: "مسحت قطعة", worn: "لبست قطعة", wore_outfit: "لبست طقم مترشح", outfit_feedback: "قيّمت طقم", measurement: "سجّلت قياس", step: "علّمت على خطوة", week_closed: "قفلت أسبوع", goal_status: "غيّرت حالة هدف", migrated: "نقل البيانات", onboarded: "عملت ملفك", studio_photo: "صورة استوديو", update_about: "حدّث اللي يعرفه عنك" };
 function reviewText(dt, w) {
   const adv = dt.msgs.filter((m) => m.role === "assistant"), me = dt.acts.filter((a) => a.actor === "me"), ad = dt.acts.filter((a) => a.actor === "advisor");
   const cost = dt.use.reduce((s, r) => s + Number(r.cost_usd || 0), 0);
@@ -583,8 +725,9 @@ function sheetFrame(title, body, foot, back) {
 }
 function renderSheet() {
   const s = S.sheet; if (!s) { $("#sheet").innerHTML = ""; return; }
-  s.keepScroll = ["item", "settings", "review"].includes(s.type);
-  if (s.type === "add") return sheetAdd(s);
+  s.keepScroll = ["item", "settings", "review", "atelier"].includes(s.type);
+  if (s.type === "add") return s.step === "magic" ? sheetMagic(s) : sheetAdd(s);
+  if (s.type === "atelier") return sheetAtelier(s);
   if (s.type === "item") return sheetItem(s);
   if (s.type === "settings") return sheetSettings(s);
   if (s.type === "review") return sheetReview(s);
@@ -596,15 +739,17 @@ function renderSheet() {
 }
 function sheetAdd(s) {
   const d = s.d, isP = d.category === "perfume", old = s.id ? item(s.id) : null;
-  if (s.step === "cat") return sheetFrame("قطعة جديدة", `<div class="col"><h1>إيه نوعها؟</h1><div class="tiles">${Object.entries(CATS).map(([k, [l, i]]) => `<button class="tile" data-pick="${k}">${ic(i)}${l}</button>`).join("")}</div></div>`);
+  if (s.step === "cat") return sheetFrame("قطعة جديدة", `<div class="col"><label class="magic">${ic("cam")}<span><strong>صوّرها وسيب الباقي على ${PERSONA.name}</strong><small>بيشيل الخلفية ويعمل صورة استوديو، ويتعرف على القطعة ويملى التفاصيل</small></span><input type="file" accept="image/*" data-magic="1" aria-label="صورة القطعة"></label><h3>أو اختار النوع بنفسك</h3><div class="tiles">${Object.entries(CATS).map(([k, [l, i]]) => `<button class="tile" data-pick="${k}">${ic(i)}${l}</button>`).join("")}</div></div>`);
   if (s.step === "photos") { const n = SLOTS.filter(([k]) => S.prev["p_" + k] || old?.photos?.[k]).length;
     return sheetFrame(s.id ? "تعديل الصور" : "الصور", `<div class="col"><h1>صوّر القطعة</h1><p class="lead">صور اللبس هي اللي بيتحكم منها على المقاس.</p>${Shots(SLOTS, "p_", old?.photos || {})}<div class="tip">إضاءة نهار، والموبايل على ارتفاع وسطك، ووقفة طبيعية قدام المراية أو بالتايمر.</div></div>`,
       `<button class="btn main wide" data-a="toDetails">${n ? `التالي (${n} من 5)` : "التالي"}</button>${n ? "" : `<button class="btn text" data-a="toDetails">من غير صور دلوقتي</button>`}`, s.id ? null : "toCat"); }
   const hasPh = !isP && SLOTS.some(([k]) => S.prev["p_" + k] || old?.photos?.[k]);
   const more = isP ? `${F("sh", d, "ml", "الحجم", { num: 1, unit: "مل" })}<div class="field"><span>النوع</span>${Seg("sh", d, "ptype", [["أصلي", "أصلي"], ["تركيبة", "تركيبة"], ["محلي", "محلي"]])}</div>${F("sh", d, "when", "إمتى ومن فين؟", { ph: "للعطور اللي هتشتريها" })}`
     : `<div class="pair">${F("sh", d, "brand", "الماركة")}${F("sh", d, "size", "المقاس المكتوب")}</div>${F("sh", d, "fabric", "الخامة", { ph: "من التيكت" })}`;
+  const mr = s.magic?.result;
   return sheetFrame(s.id ? "تعديل" : "التفاصيل", `<div class="col lg">
-    ${isP ? `<div class="col">${Shots(PSLOT, "p_", old?.photos || {})}<p class="sub xs">صورة للزجاجة على خلفية سادة في إضاءة نهار.</p></div>` : ""}
+    ${mr ? `<div class="col"><img src="${mr.shot}" alt="الصورة الشيك" style="width:100%;border-radius:18px"><div class="tip">${PERSONA.name} ملى التفاصيل${mr.confidence ? " (ثقته: " + esc(mr.confidence) + ")" : ""}. راجعها وعدّل أي حاجة غلط.${mr.read ? `<br><span class="xs">المكتوب في الصورة: «${esc(mr.read)}»</span>` : ""}</div>${s.magic.idErr ? `<div class="err">التعرف على القطعة ماشتغلش: ${esc(s.magic.idErr)}. اكتب التفاصيل بنفسك.</div>` : ""}<div class="field"><span>النوع</span><div class="choices">${Object.entries(CATS).map(([k, [l]]) => `<button type="button" class="choice" data-scope="sh" data-seg="category" data-v="${k}" aria-pressed="${d.category === k}">${l.split(" /")[0]}</button>`).join("")}</div></div></div>` : ""}
+    ${isP && !mr ? `<div class="col">${Shots(PSLOT, "p_", old?.photos || {})}<p class="sub xs">صورة للزجاجة على خلفية سادة في إضاءة نهار.</p></div>` : ""}
     <div class="col">${F("sh", d, "name", "سمّيها", { ph: isP ? "اسم العطر" : "مثلاً: قميص أبيض أكسفورد" })}${isP ? F("sh", d, "house", "البيت / الماركة") : F("sh", d, "color", "اللون")}</div>
     ${isP ? `<div class="field"><span>حالته</span>${Seg("sh", d, "pstatus", [["owned", "عندي"], ["planned", "هشتريه"], ["retired", "بطّلته"]])}</div><div class="field"><span>استخدامه</span>${Seg("sh", d, "role", [["daily", "يومي"], ["occasion", "مناسبات وتعتيق"]])}</div>` : ""}
     <div class="field"><span>بتلبسها في</span>${Multi("sh", d, "occasions", OCC)}</div>
@@ -618,7 +763,8 @@ async function saveItem(analyzeAfter) {
   const name = String(d.name || "").trim(); if (!name) { toast("سمّي القطعة الأول"); return; }
   const btns = [...document.querySelectorAll("[data-a=saveItem]")]; btns.forEach((b) => (b.disabled = true)); const b0 = $("#saveItem"); const t0 = b0.textContent; b0.innerHTML = '<span class="spin"></span> بنحفظ…';
   try {
-    const photos = { ...(old?.photos || {}) };
+    const pp = s.photosPreset; const preset = !pp ? {} : isP ? { bottle: pp.bottle || pp.studio, bottleOriginal: pp.bottleOriginal || pp.flatFront } : { studio: pp.studio || pp.bottle, flatFront: pp.flatFront || pp.bottleOriginal };
+    const photos = { ...(old?.photos || {}), ...preset };
     for (const [k] of isP ? PSLOT : SLOTS) { const b = S.pending["p_" + k]; if (b) { photos[k] = await upload(b, "items"); delete S.pending["p_" + k]; } }
     const changed = JSON.stringify(photos) !== JSON.stringify(old?.photos || {});
     const base = { ...(old || {}), ...d }; for (const k of ITEM_TOP) delete base[k];
@@ -634,12 +780,15 @@ async function saveItem(analyzeAfter) {
 }
 function sheetItem(s) {
   const it = item(s.id); if (!it) { closeSheet(); return; }
-  const isP = it.category === "perfume"; const ph = (isP ? PSLOT : SLOTS).filter(([k]) => it.photos?.[k]);
+  const isP = it.category === "perfume"; const ph = [...(isP ? PSLOT : [["studio", "صورة الاستوديو"], ...SLOTS])].filter(([k]) => it.photos?.[k]);
+  const canStudio = isP ? (it.photos?.bottleOriginal || it.photos?.bottle) : (it.photos?.flatFront || it.photos?.wornFront);
+  const studioBtn = canStudio ? (S.busy === "studio:" + it.id ? `<div class="tip"><span class="spin"></span> بيشيل الخلفية ويعمل الصورة الشيك…</div>` : `<button class="btn wide" data-a="restudio">${ic("spark")}${isP && it.photos?.bottleOriginal || it.photos?.studio ? "اعمل الصورة الشيك تاني" : "اعمل صورة شيك"}</button>`) : "";
   const facts = (isP ? [["البيت", it.house], ["النوع", it.ptype], ["الاستخدام", it.role === "daily" ? "يومي (شغل ومشاوير)" : "مناسبات وتعتيق"], ["الحجم", it.ml ? it.ml + " مل" : ""], ["الحالة", (PST[it.pstatus] || PST.owned)[0]], ["إمتى ومن فين", it.when], ["الموسم", it.season], ["المناسبات", (it.occasions || []).join("، ")], ["ملاحظات", it.notes]]
     : [["النوع", (CATS[it.category] || [""])[0]], ["اللون", it.color], ["الماركة", it.brand], ["المقاس", it.size], ["الخامة", it.fabric], ["الموسم", it.season], ["المناسبات", (it.occasions || []).join("، ")], ["آخر مرة لبستها", it.lastWorn ? fmtD(it.lastWorn) : ""], ["ملاحظات", it.notes]]).filter((x) => x[1]);
   const del = s.confirmDel ? `<div class="box" id="delBox" style="border:1.5px solid var(--bad)"><strong>تمسح "${esc(it.name)}"؟</strong><p class="sub sm">مش هتقدر ترجعها.</p><div class="pair"><button class="btn red" data-a="delYes">امسحها</button><button class="btn" data-a="delNo">لأ</button></div></div>` : "";
   return sheetFrame(esc(it.name || "قطعة"), `<div class="col lg">
     ${ph.length ? `<div class="strip">${ph.map(([k, l]) => `<figure>${img(it.photos[k], l)}<figcaption>${l}</figcaption></figure>`).join("")}</div>` : isP ? `<div class="hero-empty">${mono(it, 1)}${pill(PST[it.pstatus] || PST.owned)}${it.pstatus !== "planned" ? `<button class="btn" data-a="edit">${ic("cam")}صوّر الزجاجة</button>` : ""}</div>` : ""}
+    ${studioBtn}
     ${isP ? "" : analysis(it)}
     ${facts.length ? `<div class="box"><dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>` : ""}
     ${del || `<div class="actions" style="grid-template-columns:repeat(${isP ? 2 : 3},1fr)">${isP ? "" : `<button class="btn" data-a="worn">${ic("check")}لبستها النهارده</button>`}<button class="btn" data-a="edit">${ic("edit")}تعديل</button><button class="btn red" data-a="del">${ic("trash")}مسح</button></div>`}</div>`);
@@ -672,7 +821,9 @@ document.addEventListener("input", (e) => {
   const d = scopeDraft(t.dataset.scope === "sh" ? "sheet" : t.dataset.scope); if (d) d[t.dataset.b] = t.value;
 });
 document.addEventListener("change", async (e) => {
-  const t = e.target; if (!t.matches("input[type=file][data-slot]")) return;
+  const t = e.target;
+  if (t.matches("input[type=file][data-magic]")) { const f = t.files?.[0]; if (f) magicAdd(f); return; }
+  if (!t.matches("input[type=file][data-slot]")) return;
   const f = t.files?.[0]; if (!f) return; const key = t.dataset.slot;
   try {
     const b = await shrink(f); S.pending[key] = b; S.prev[key] = URL.createObjectURL(b);
@@ -688,10 +839,10 @@ document.addEventListener("click", async (e) => {
   const g = e.target.closest("[data-seg],[data-multi],[data-one]");
   if (g) { const sc = g.dataset.scope === "sh" ? "sheet" : g.dataset.scope; const d = scopeDraft(sc); if (!d) return;
     if (g.dataset.one) { d[g.dataset.one] = g.dataset.v; g.parentElement.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === g))); return; }
+    if (g.dataset.seg === "category" && S.sheet?.type === "add") { d.category = g.dataset.v; renderSheet(); return; }
     if (g.dataset.seg) d[g.dataset.seg] = g.dataset.v; else { const k = g.dataset.multi; const a = new Set(d[k] || []); a.has(g.dataset.v) ? a.delete(g.dataset.v) : a.add(g.dataset.v); d[k] = [...a]; }
     g.parentElement.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", g.dataset.seg ? String(b === g) : String((d[g.dataset.multi] || []).includes(b.dataset.v)))); return; }
-  const tab = e.target.closest("[data-tab]"); if (tab) { S.tab = tab.dataset.tab; render(); scrollTo(0, 0); return; }
-  const as = e.target.closest("[data-aseg]"); if (as) { S.adv.seg = as.dataset.aseg; render(); if (S.adv.seg === "chat") scrollChat(); else scrollTo(0, 0); return; }
+  const tab = e.target.closest("[data-tab]"); if (tab) { S.tab = tab.dataset.tab; render(); if (S.tab === "advisor") scrollChat(); else scrollTo(0, 0); return; }
   const rs = e.target.closest("[data-rseg]"); if (rs) { S.reco.seg = rs.dataset.rseg; render(); return; }
   const sh = e.target.closest("[data-shelf]"); if (sh) { S.shelf = sh.dataset.shelf; render(); return; }
   const op = e.target.closest("[data-open]"); if (op) { openSheet({ type: "item", id: op.dataset.open }); return; }
@@ -718,7 +869,13 @@ document.addEventListener("click", async (e) => {
     case "report": aiJob("report", "report", {}, async (r) => { S.state.closet_report = r.report; }); break;
     case "shop": aiJob("shop", "shop", { ask: S.reco.shopAsk }, async (r) => { S.state.shop = r.shop; }); break;
     case "assess": aiJob("assess", "assess", {}, async () => { await reloadPart("advisor"); }); break;
-    case "toEval": S.adv.seg = "eval"; render(); break;
+    case "atelier": openSheet({ type: "atelier", view: "home" }); reloadPart("notes").then(() => S.sheet?.type === "atelier" && renderSheet()); break;
+    case "atelierGo": S.sheet.view = a.dataset.v; renderSheet(); $("#sheet .sheet-body") && ($("#sheet .sheet-body").scrollTop = 0); break;
+    case "atelierHome": S.sheet.view = "home"; renderSheet(); break;
+    case "advStop": S.adv.ctl?.abort(); break;
+    case "restudio": restudio(s.id); break;
+    case "learnSave": { const v = num(s.d.dcap); if (v == null || v < 0 || v > 1) { toast("اكتب رقم من 0 لـ1 دولار"); break; }
+      try { await q(sb.from("settings").update({ daily_learn: s.d.dlearn !== "off", daily_learn_cap_usd: v, updated_at: new Date().toISOString() }).eq("owner_id", uid())); await reloadPart("settings"); toast("اتحفظ"); renderSheet(); } catch (er) { toast("ماتحفظش: " + er.message); } break; }
     case "week": aiJob("week", "week", {}, async () => { await reloadPart("advisor"); }); break;
     case "weekTick": advWrite((x) => { const c = x.week?.checklist?.[+a.dataset.i]; if (c) c.done = !c.done; }); break;
     case "stepTick": advWrite((x) => { const gg = (x.goals || []).find((g) => g.id === a.dataset.g); const st = gg?.steps?.[+a.dataset.i]; if (st) { st.done = !st.done; act("step", { goal: gg.title, step: st.t, done: st.done }); } if (gg && gg.steps.every((z) => z.done)) gg.status = "done"; }); break;
@@ -746,7 +903,7 @@ document.addEventListener("click", async (e) => {
     case "sheetMeasure": openSheet({ type: "measure", d: measToDraft(S.meas[0]) }); break;
     case "sheetBody": openSheet({ type: "body" }); break;
     case "sheetPerf": openSheet({ type: "perf", d: { perfumePrefs: S.profile?.perfumePrefs || "", perfumeRestock: S.profile?.perfumeRestock || "" } }); break;
-    case "sheetSettings": openSheet({ type: "settings", d: { cap: String(S.settings?.monthly_cap_usd ?? 5) } }); reloadPart("usage").then(() => S.sheet?.type === "settings" && renderSheet()); break;
+    case "sheetSettings": openSheet({ type: "settings", d: { cap: String(S.settings?.monthly_cap_usd ?? 5), dlearn: S.settings?.daily_learn === false ? "off" : "on", dcap: String(S.settings?.daily_learn_cap_usd ?? 0.1) } }); reloadPart("usage").then(() => S.sheet?.type === "settings" && renderSheet()); break;
     case "sheetReview": openReview(); break;
     case "saveProfile": { const d = s.d; if (!String(d.name || "").trim() || !num(d.heightCm)) { toast("الاسم والطول لازمين"); break; }
       try { await q(sb.from("profiles").update({ name: String(d.name).trim(), height_cm: num(d.heightCm), glasses: d.glasses !== "no", updated_at: new Date().toISOString() }).eq("owner_id", uid())); await reloadPart("profile"); toast("اتحفظ"); closeSheet(); } catch (er) { toast("ماتحفظش: " + er.message); } break; }

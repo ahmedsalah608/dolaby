@@ -61,7 +61,9 @@ type Ctx = {
   started: number; usage: { model: string; in: number; out: number; cr: number; cw: number; searches: number; cost: number };
   monthSpent: number; cap: number; searched: boolean; searchErrors: string[]; sources: { url: string; title: string }[];
   actions: { tool: string; input: unknown }[];
+  emit?: (ev: Record<string, unknown>) => void;
 };
+const TOOL_LABEL: Record<string, string> = { get_profile: "بيقرا ملفك", update_profile: "بيحدّث ملفك", get_measurements: "بيبص على مقاساتك", add_measurement: "بيسجّل مقاس", list_items: "بيبص على دولابك", update_item: "بيعدّل قطعة", set_verdict: "بيحفظ حكم على قطعة", save_lesson: "بيسجّل درس اتعلمه منك", update_about: "بيحدّث اللي يعرفه عنك", set_goals: "بيحدّث أهدافك" };
 
 // ---------- Anthropic call with all the guards ----------
 async function callClaude(ctx: Ctx, body: Record<string, unknown>) {
@@ -100,7 +102,7 @@ async function callClaude(ctx: Ctx, body: Record<string, unknown>) {
   });
   // search bookkeeping: report failures exactly, collect sources
   for (const b of data.content || []) {
-    if (b.type === "server_tool_use" && b.name === "web_search") ctx.searched = true;
+    if (b.type === "server_tool_use" && b.name === "web_search") { ctx.searched = true; ctx.emit?.({ kind: "search", label: "بدوّر على النت", detail: String(b.input?.query || "") }); }
     if (b.type === "web_search_tool_result" && b.content && !Array.isArray(b.content) && b.content.type === "web_search_tool_result_error") {
       ctx.searchErrors.push(b.content.error_code);
     }
@@ -157,6 +159,7 @@ async function runLoop(ctx: Ctx, opts: { model: string; system: string; messages
       msgs.push({ role: "assistant", content });
       const results = [];
       for (const tu of toolUses) {
+        ctx.emit?.({ kind: "tool", label: TOOL_LABEL[tu.name] || tu.name });
         let out: unknown; let isErr = false;
         try { out = await runTool(ctx, tu.name, tu.input || {}); }
         catch (e) { out = "خطأ: " + (e as Error).message; isErr = true; }
@@ -175,22 +178,23 @@ async function runLoop(ctx: Ctx, opts: { model: string; system: string; messages
 // ---------- data access (service role, always filtered by owner) ----------
 async function loadAll(ctx: Ctx) {
   const db = ctx.db, uid = ctx.uid;
-  const [p, m, it, adv, les] = await Promise.all([
+  const [p, m, it, adv, les, sn] = await Promise.all([
     db.from("profiles").select("*").eq("owner_id", uid).maybeSingle(),
     db.from("measurements").select("*").eq("owner_id", uid).order("taken_at", { ascending: false }).limit(3),
     db.from("items").select("id,category,name,data,analysis,last_worn,photos").eq("owner_id", uid).order("created_at", { ascending: false }),
     db.from("advisor").select("*").eq("owner_id", uid).maybeSingle(),
     db.from("lessons").select("id,rule").eq("owner_id", uid).order("id"),
+    db.from("style_notes").select("day,topic,insight").eq("owner_id", uid).order("id", { ascending: false }).limit(8),
   ]);
-  return { profile: p.data, meas: m.data || [], items: it.data || [], advisor: adv.data || { about: {}, goals: [] }, lessons: les.data || [] };
+  return { profile: p.data, meas: m.data || [], items: it.data || [], advisor: adv.data || { about: {}, goals: [] }, lessons: les.data || [], notes: (sn.data || []) as any[] };
 }
 const CAT: Record<string, string> = { top: "قميص/تيشيرت", bottom: "بنطلون", outer: "جاكيت/بدلة", shoes: "جزمة", acc: "إكسسوار", perfume: "عطر" };
 const VERD: Record<string, string> = { keep: "تفضل", tailor: "للخياط", remove: "تخرج" };
 function itemLine(i: any) {
   const d = i.data || {}; const a = i.analysis;
   const bits = [`[${i.id}] ${CAT[i.category] || i.category}: ${i.name}`];
-  if (i.category === "perfume") bits.push([d.house, d.ptype, d.role === "daily" ? "يومي" : "مناسبات", d.season, d.pstatus === "planned" ? "ناوي يشتريه " + (d.when || "") : d.pstatus === "retired" ? "بطّله" : "عنده", d.notes].filter(Boolean).join(" · "));
-  else bits.push([d.color, d.brand, d.size, d.fabric, (d.occasions || []).join("، "), a ? "الحكم: " + (VERD[a.verdict] || a.verdict) + (a.fit?.overall ? " · المقاس " + a.fit.overall : "") : "لسه ماتحكمش عليها", a?.description].filter(Boolean).join(" · "));
+  if (i.category === "perfume") bits.push([d.house, d.ptype, d.role === "daily" ? "يومي" : "مناسبات", d.season, d.pstatus === "planned" ? "ناوي يشتريه " + (d.when || "") : d.pstatus === "retired" ? "بطّله" : "عنده", d.notes ? String(d.notes).slice(0, 60) : ""].filter(Boolean).join(" · "));
+  else bits.push([d.color, d.brand, d.size, d.fabric, (d.occasions || []).join("، "), a ? "الحكم: " + (VERD[a.verdict] || a.verdict) + (a.fit?.overall ? " · المقاس " + a.fit.overall : "") : "لسه ماتحكمش عليها", a?.description ? String(a.description).slice(0, 80) : ""].filter(Boolean).join(" · "));
   if (i.last_worn) bits.push("آخر لبسة " + String(i.last_worn).slice(0, 10));
   return bits.join(" — ");
 }
@@ -201,7 +205,7 @@ function contextText(all: Awaited<ReturnType<typeof loadAll>>) {
   const goals = (all.advisor.goals || []).filter((g: any) => g.status !== "done").map((g: any) => `- [${g.id}] ${g.title} (${g.area}) ${g.status === "paused" ? "متأجل" : "شغال"}: ${(g.steps || []).map((s: any) => (s.done ? "✓ " : "") + s.t).join("، ")}`).join("\n") || "(لسه مفيش)";
   return `النهارده: ${cairoNow()} (بتوقيت مصر). بيعيش في إسكندرية.
 ملف أحمد: الاسم ${p.name || "-"} · الطول ${p.height_cm ?? "؟"} سم · بيلبس نضارة: ${p.glasses === false ? "لأ" : "أيوه (متخدشة ومش عارف ينضفها صح)"}
-بيانات تانية قالها: ${JSON.stringify(d)}
+بيانات تانية قالها: ${Object.entries(d).map(([k, v]) => k + ": " + String(v).replace(/\s+/g, " ").slice(0, 220)).join(" | ")}
 صور جسمه محفوظة: ${Object.keys(p.body_photos || {}).join("، ") || "مفيش"}
 المقاسات (الأحدث الأول، سم/كجم):
 ${m}
@@ -211,6 +215,8 @@ ${Object.keys(about).length ? Object.entries(about).map(([k, v]) => `- ${k}: ${v
 الأهداف:
 ${goals}
 خطة الأسبوع: ${all.advisor.week && !all.advisor.week.done ? all.advisor.week.goal + " · التحدي: " + all.advisor.week.challenge : "مفيش"}
+ملاحظات الموضة من بحثك اليومي (الأحدث الأول):
+${all.notes.map((n: any) => `- ${n.day}: ${n.topic} — ${String(n.insight).slice(0, 220)}`).join("\n") || "(لسه مفيش)"}
 الدولاب (${all.items.length} قطعة):
 ${all.items.map(itemLine).join("\n") || "(فاضي)"}`;
 }
@@ -218,20 +224,29 @@ function lessonsText(lessons: any[]) {
   return lessons.length ? "دروس اتعلمتها من أحمد (التزم بيها دايماً):\n" + lessons.map((l) => `- ${l.rule}`).join("\n") : "دروس اتعلمتها: (لسه مفيش)";
 }
 
-const RULES = `إنت "المستشار": المستشار الشخصي لأحمد في المظهر. خبرتك: الهدوم والمقاسات والخياطة، النضارات، الحلاقة والشعر والدقن والعناية الشخصية، الإتيكيت، الشخصية والثقة، الجسم والوقفة، المشي، وطريقة الكلام.
+const RULES = `إنت "لورينزو": خيّاط ومستشار مظهر إيطالي شيك، خبرة سنين في ستايلات العالم كله، وبتتكلم عامية مصرية بسيطة مع أحمد (بتناديه "يا أحمد"). خبرتك: الهدوم والمقاسات والخياطة، النضارات، الحلاقة والشعر والدقن والعناية الشخصية، الإتيكيت، الشخصية والثقة، الجسم والوقفة، المشي، وطريقة الكلام.
+شكل الرد (مهم جداً):
+- الرد يتقسم لرسايل قصيرة زي الشات: من 1 لـ4 رسايل، بينهم سطر لوحده فيه --- بس. كل رسالة جملتين أو تلاتة قصيرين بالكتير.
+- أي ترشيح لطقم أو قطع أو خطوات اكتبه كارت بالشكل ده بالظبط (JSON في سطر واحد بين علامات الكود):
+\`\`\`card
+{"title":"عنوان قصير","tag":"كلمتين","rows":[{"item_id":"id القطعة لو من الدولاب أو فاضي","title":"اسم","sub":"سبب في جملة"}],"footer":"ناقصك: ... (اختياري)","action":"زرار اختياري زي: دوّرلي على سعر"}
+\`\`\`
+- آخر سطر في الرد: من 2 لـ3 ردود جاهزة أحمد ممكن يدوس عليها، بالشكل ده: [[ردود: رد أول | رد تاني | رد تالت]]
+- لما ترشح فيديو: [[يوتيوب: جملة البحث]] في سطر لوحده. ما تخترعش لينكات ولا أسماء فيديوهات.
+- ممنوع مقدمات طويلة أو تكرار الكلام.
 طريقتك:
-- عامية مصرية بسيطة، وأقل إنجليزي ممكن. ردود قصيرة وواضحة، ومن غير مجاملة.
-- لما يقول حاجة بيحبها أو بيكرهها أو تفصيلة عن نفسه، اسأله "ليه" وسؤال أو اتنين متابعة قبل ما ترشح.
-- ما تفترضش حاجة ما قالهاش. افصل بوضوح بين المؤكد ("**مؤكد:**") ورأيك أو تخمينك ("**رأيي:**").
-- شغلك خطوة خطوة: تقييم واضح، بعدين أهداف واضحة، بعدين تحسين تدريجي. اربط كلامك بالأهداف وخطة الأسبوع.
-- الستايل والشغل والمناسبات مش متعبيين مقدماً: بيتبنوا من كلامه. أول ما تعرف حاجة جديدة ثابتة عنه سجلها بأداة update_about.
-- لما يصححك أو يقول تفضيل: سجّل قاعدة عامة قصيرة بأداة save_lesson (جملة واحدة، من غير تفاصيل اللحظة).
-- الأسعار والمحلات والإحصائيات: ممنوع تخترعها. أي سعر أو محل أو رقم لازم يكون من بحث web_search في نفس الرد ده، مع اللينك. أي حاجة مش من بحث في نفس الرد اكتب قبلها "**اقتراح (من غير بحث):**".
+- ردود صريحة ومن غير مجاملة، وأقل إنجليزي ممكن.
+- لما يقول حاجة بيحبها أو بيكرهها أو تفصيلة عن نفسه، اسأله "ليه" وسؤال متابعة قبل ما ترشح.
+- ما تفترضش حاجة ما قالهاش. لما تحتاج تفرّق: "**مؤكد:**" للمعلومة و"**رأيي:**" لرأيك.
+- شغلك خطوة خطوة: تقييم، بعدين أهداف، بعدين تحسين تدريجي، واربط كلامك بالأهداف وخطة الأسبوع.
+- الستايل والشغل والمناسبات بيتبنوا من كلامه: أول ما تعرف حاجة ثابتة عنه سجلها بأداة update_about.
+- لما يصححك أو يقول تفضيل: سجّل قاعدة عامة قصيرة بأداة save_lesson.
+- الأسعار والمحلات والإحصائيات: ممنوع تخترعها. أي سعر أو محل أو رقم لازم يكون من بحث web_search في نفس الرد ده مع اللينك. غير كده اكتب قبلها "**اقتراح (من غير بحث):**".
+- ملاحظات الموضة اليومية اللي تحت هي بحثك إنت في الأيام اللي فاتت: استخدمها كخلفية، وما تقدمهاش على إنها أسعار النهارده.
 - ماتربطش الكلام بميزانية أو تحويش.
-- الصحة والوزن والأدوية: كلام عام بس، ومن غير أرقام أكل أو سعرات، وارجعه لدكتوره. النضارة الطبية والعدسات قرارها عند دكتور العيون.
+- الصحة والوزن والأدوية: كلام عام بس، من غير أرقام أكل أو سعرات، وارجعه لدكتوره. النضارة الطبية قرارها عند دكتور العيون.
 - لو بعت صورة، علّق على اللي باين فيها بس.
-- في آخر كل رد تعليمي رشّح فيديو يتعلم منه، بالشكل ده بالظبط: [[يوتيوب: جملة البحث]]. ما تخترعش لينكات ولا أسماء فيديوهات.
-- لما تغيّر بيانات بأداة، قوله في جملة إيه اللي اتغير.`;
+- لما تغيّر بيانات بأداة، قول في جملة قصيرة إيه اللي اتغير.`;
 
 // ---------- tools the advisor may call ----------
 const TOOLS = [
@@ -316,6 +331,7 @@ async function modeChat(ctx: Ctx, body: any) {
   const text = String(body.text || "").trim().slice(0, 4000);
   const imagePath = body.image_path ? String(body.image_path) : null;
   if (!text && !imagePath) throw new AppError("empty", "اكتب رسالة أو ابعت صورة.");
+  ctx.emit?.({ kind: "read", label: "بيبص على دولابك وملفك" });
   const all = await loadAll(ctx);
   const { data: hist } = await ctx.db.from("chat_messages").select("role,content,image_path").eq("owner_id", ctx.uid).order("id", { ascending: false }).limit(20);
   await ctx.db.from("chat_messages").insert({ owner_id: ctx.uid, role: "user", content: text, image_path: imagePath });
@@ -330,7 +346,9 @@ async function modeChat(ctx: Ctx, body: any) {
   if (messages[messages.length - 1]?.role === "user") messages.pop();
   messages.push({ role: "user", content: cur });
   const system = `${RULES}\n\n${lessonsText(all.lessons)}\n\n${contextText(all)}`;
+  ctx.emit?.({ kind: "think", label: "بيفكر في الرد" });
   const r = await runLoop(ctx, { model: MODELS.smart, system, messages, tools: [...TOOLS, webSearchTool(4)], maxTokens: 3000 });
+  ctx.emit?.({ kind: "write", label: "بيكتبلك الرد" });
   let reply = r.text.trim();
   if (r.stopped) reply = (reply ? reply + "\n\n" : "") + "وقفت قبل ما أخلص عشان الوقت. اكتب «كمل» وأنا هكمّل.";
   if (ctx.searchErrors.length) reply += `\n\n⚠ البحث فشل: ${[...new Set(ctx.searchErrors)].join("، ")}`;
@@ -475,6 +493,19 @@ async function modeLearn(ctx: Ctx) {
   return { added: add };
 }
 
+// look at a photo of a new piece and fill its details (reads labels; never guesses a brand it can't see)
+async function modeIdentify(ctx: Ctx, body: any) {
+  const img = await imageBlock(ctx, String(body.image_path || ""));
+  const hint = body.category ? `أحمد قال إنها: ${String(body.category)}.` : "";
+  const sys = "إنت خبير موضة وعطور. بتتعرف على القطعة اللي في الصورة بدقة. اقرا المكتوب على التيكت أو الزجاجة حرف بحرف. أي حاجة مش باينة أو مش متأكد منها سيبها فاضية، ما تخمنش ماركة أو اسم. رد بـJSON بس.";
+  const prompt = `${hint}
+{"category":"top|bottom|outer|shoes|acc|perfume","name":"اسم قصير بالعربي أو اسم المنتج زي ما هو مكتوب","brand":"الماركة أو البيت لو مكتوبة بس","color":"اللون بالعربي","ptype":"أصلي|تركيبة|محلي أو فاضي","ml":0,"season":"كل المواسم|صيفي|شتوي","occasions":["شغل|سايت|خروج|رسمي|بيت|رياضة"],"notes":"وصف قصير للي باين (للعطر: نوع الريحة لو مكتوب)","read_text":"الكلام المكتوب في الصورة زي ما هو","confidence":"عالية|متوسطة|قليلة"}`;
+  const r = await runLoop(ctx, { model: MODELS.smart, system: sys, messages: [{ role: "user", content: [img, { type: "text", text: prompt }] }], tools: [], maxTokens: 700 });
+  const o = parseJsonLoose(r.text);
+  const cats = ["top", "bottom", "outer", "shoes", "acc", "perfume"];
+  return { item: { category: cats.includes(o.category) ? o.category : (body.category || "top"), name: String(o.name || "").slice(0, 80), brand: String(o.brand || "").slice(0, 60), color: String(o.color || "").slice(0, 40), ptype: String(o.ptype || ""), ml: Number(o.ml) || null, season: ["كل المواسم", "صيفي", "شتوي"].includes(o.season) ? o.season : "كل المواسم", occasions: (Array.isArray(o.occasions) ? o.occasions : []).map(String).filter((x: string) => ["شغل", "سايت", "خروج", "رسمي", "بيت", "رياضة"].includes(x)), notes: String(o.notes || "").slice(0, 200), read_text: String(o.read_text || "").slice(0, 200), confidence: String(o.confidence || "") } };
+}
+
 async function modePing(ctx: Ctx) {
   const r = await callClaude(ctx, { model: MODELS.cheap, max_tokens: 10, messages: [{ role: "user", content: "قول: تمام" }] });
   return { ok: true, text: (r.content || []).map((b: any) => b.text || "").join("") };
@@ -504,10 +535,33 @@ Deno.serve(async (req) => {
     const c: Ctx = { req, uid, db, key: sec.anthropic_key, started, usage: { model: "", in: 0, out: 0, cr: 0, cw: 0, searches: 0, cost: 0 }, monthSpent, cap: Number(st?.monthly_cap_usd ?? 5), searched: false, searchErrors: [], sources: [], actions: [] };
     ctx = c;
     if (monthSpent >= c.cap) throw new AppError("cap", `وصلت لحد الصرف الشهري (${ctx.cap} دولار). تقدر تزوده من الإعدادات.`, 402);
-    const handlers: Record<string, (c: Ctx, b: any) => Promise<unknown>> = { chat: modeChat, verdict: modeVerdict, report: modeReport, shop: modeShop, outfit: modeOutfit, assess: modeAssess, week: modeWeek, review: modeReview, learn: modeLearn, ping: modePing };
+    const handlers: Record<string, (c: Ctx, b: any) => Promise<unknown>> = { chat: modeChat, verdict: modeVerdict, report: modeReport, shop: modeShop, outfit: modeOutfit, assess: modeAssess, week: modeWeek, review: modeReview, learn: modeLearn, ping: modePing, identify: modeIdentify };
     const h = handlers[mode]; if (!h) throw new AppError("mode", "طلب مش معروف: " + mode);
+    const logUsage = (ok: boolean, error?: string) => db.from("usage_log").insert({ owner_id: uid, kind: mode, model: c.usage.model, input_tokens: c.usage.in, output_tokens: c.usage.out, cache_read_tokens: c.usage.cr, searches: c.usage.searches, cost_usd: c.usage.cost, ok, error: error ? error.slice(0, 500) : null });
+    if (body.stream) {
+      // live steps as NDJSON; the work keeps going (and is saved) even if the phone closes the app
+      const enc = new TextEncoder(); let closed = false; let ctrl!: ReadableStreamDefaultController;
+      const stream = new ReadableStream({ start(cc) { ctrl = cc; }, cancel() { closed = true; } });
+      const send = (o: unknown) => { if (closed) return; try { ctrl.enqueue(enc.encode(JSON.stringify(o) + "\n")); } catch { closed = true; } };
+      c.emit = (ev) => send({ type: "step", at: Date.now() - started, ...ev });
+      const work = (async () => {
+        try {
+          const result: any = await h(c, body);
+          await logUsage(true);
+          send({ type: "done", ok: true, model: c.usage.model, cost_usd: c.usage.cost, month_spent_usd: monthSpent + c.usage.cost, cap_usd: c.cap, ...result });
+        } catch (e) {
+          const err = e instanceof AppError ? e : new AppError("server", "حصلت مشكلة: " + (e as Error).message, 500);
+          if (c.usage.cost > 0) await logUsage(false, err.message);
+          console.error(mode, err.code, err.message);
+          send({ type: "error", ok: false, error: err.code, message: err.message, cost_usd: c.usage.cost });
+        } finally { if (!closed) { try { ctrl.close(); } catch { /* closed */ } } }
+      })();
+      // deno-lint-ignore no-explicit-any
+      const er = (globalThis as any).EdgeRuntime; if (er?.waitUntil) er.waitUntil(work);
+      return new Response(stream, { headers: { ...cors(req), "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" } });
+    }
     const result: any = await h(c, body);
-    await db.from("usage_log").insert({ owner_id: uid, kind: mode, model: c.usage.model, input_tokens: c.usage.in, output_tokens: c.usage.out, cache_read_tokens: c.usage.cr, searches: c.usage.searches, cost_usd: c.usage.cost, ok: true });
+    await logUsage(true);
     return json(req, { ok: true, model: c.usage.model, cost_usd: c.usage.cost, month_spent_usd: monthSpent + c.usage.cost, cap_usd: c.cap, ...result });
   } catch (e) {
     const cx = ctx as Ctx | null;
